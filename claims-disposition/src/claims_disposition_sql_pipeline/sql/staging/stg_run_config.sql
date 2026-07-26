@@ -7,7 +7,5 @@ select
   cast(ocr_device as varchar) as ocr_device,
   cast(required_fields_json as varchar) as required_fields_json,
   cast(minimum_text_confidence as double) as minimum_text_confidence,
-  cast(ai_provider as varchar) as ai_provider,
-  cast(ai_model as varchar) as ai_model,
   cast(minio_bucket as varchar) as minio_bucket
 from claims_runtime_run_config

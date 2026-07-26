@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -14,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import vane
 
-from .ai import build_evidence_ai_relation
+from .ai import AUDIT_FACT_SYSTEM_MESSAGE, probe_qwen
 from .config import RuntimeConfig
 from .minio_store import MinioStore
 from .output_writer import PublishedOutputs, write_outputs
@@ -22,7 +24,9 @@ from .pg import connect_postgres, probe_postgres, read_source_rows
 from .source_data import SourceBundle, source_bundle_from_rows
 from .vane_functions import (
     EvidenceOcrActor,
-    validate_audit_fact_json_udf,
+    build_minio_object_bytes_udf,
+    try_validate_audit_fact_for_role_json_udf,
+    validate_audit_fact_for_role_json_udf,
 )
 from .verify_outputs import verify_fixture_outputs
 
@@ -34,6 +38,20 @@ PRE_AI_STAGES = (
 )
 EVIDENCE_OCR_UDF_STAGE = SQL_ROOT / "intermediate/int_evidence_ocr_udf.sql"
 EVIDENCE_OCR_STAGE = SQL_ROOT / "intermediate/int_evidence_ocr.sql"
+EVIDENCE_AI_INPUT_STAGE = SQL_ROOT / "intermediate/int_evidence_ai_inputs.sql"
+EVIDENCE_AI_ATTEMPT_1_STAGE = (
+    SQL_ROOT / "intermediate/int_evidence_ai_attempt_1.sql"
+)
+EVIDENCE_AI_ATTEMPT_1_VALIDATION_UDF_STAGE = (
+    SQL_ROOT / "intermediate/int_evidence_ai_attempt_1_validation_udf.sql"
+)
+EVIDENCE_AI_RETRY_INPUT_STAGE = (
+    SQL_ROOT / "intermediate/int_evidence_ai_retry_inputs.sql"
+)
+EVIDENCE_AI_ATTEMPT_2_STAGE = (
+    SQL_ROOT / "intermediate/int_evidence_ai_attempt_2.sql"
+)
+EVIDENCE_AI_STAGE = SQL_ROOT / "intermediate/int_evidence_ai.sql"
 CONFLICT_VALIDATION_INPUT_STAGE = SQL_ROOT / "intermediate/int_conflict_validation_inputs.sql"
 CONFLICT_VALIDATION_UDF_STAGE = SQL_ROOT / "intermediate/int_conflict_validation_udf.sql"
 CONFLICT_FACT_STAGE = SQL_ROOT / "intermediate/int_conflict_facts.sql"
@@ -109,7 +127,42 @@ def _safe_identifier(value: str) -> str:
 
 
 def _sql_literal(value: Path) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
+    return _sql_string(str(value))
+
+
+def _sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _ai_sql_replacements(config: RuntimeConfig) -> dict[str, str]:
+    """Render constant, credential-free SQL options required by ai_prompt."""
+
+    return {
+        "__OCR_MIN_CONFIDENCE_SQL__": repr(config.ocr.minimum_confidence),
+        "__AI_PROVIDER_SQL__": _sql_string(config.ai.provider),
+        "__AI_MODEL_SQL__": _sql_string(config.ai.model),
+        "__AI_BASE_URL_SQL__": _sql_string(config.ai.base_url),
+        "__AI_TIMEOUT_SQL__": repr(config.ai.timeout_seconds),
+        "__AI_CONCURRENCY_SQL__": str(config.ai.concurrency),
+        "__AI_TEMPERATURE_SQL__": repr(config.ai.temperature),
+        "__AI_MAX_TOKENS_SQL__": str(config.ai.max_tokens),
+        "__AI_SYSTEM_MESSAGE_SQL__": _sql_string(AUDIT_FACT_SYSTEM_MESSAGE),
+    }
+
+
+@contextmanager
+def _openai_api_key(value: str):
+    """Expose the configured credential to SQL AI actors without serializing it."""
+
+    previous_api_key = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = value
+    try:
+        yield
+    finally:
+        if previous_api_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = previous_api_key
 
 
 def register_or_replace_table(
@@ -146,9 +199,10 @@ def materialize_relation(relation: Any) -> pa.Table:
 def _execute_sql_file(
     connection: Any,
     path: Path,
+    replacements: Mapping[str, str] | None = None,
 ) -> None:
     try:
-        statement = path.read_text(encoding="utf-8")
+        statement = _render_sql(path, replacements)
     except OSError as exc:
         raise RuntimeError(f"cannot read SQL stage {path}: {exc}") from exc
     connection.execute(statement)
@@ -199,10 +253,24 @@ def attach_runtime_functions(
     """Attach the release-facing stateless and stateful SQL functions."""
 
     vane.attach_function(
-        validate_audit_fact_json_udf,
+        validate_audit_fact_for_role_json_udf,
         connection=connection,
-        alias="validate_audit_fact_json",
-        parameters=["VARCHAR"],
+        alias="validate_audit_fact_for_role_json",
+        parameters=["VARCHAR", "VARCHAR"],
+        replace=True,
+    )
+    vane.attach_function(
+        try_validate_audit_fact_for_role_json_udf,
+        connection=connection,
+        alias="try_validate_audit_fact_for_role_json",
+        parameters=["VARCHAR", "VARCHAR"],
+        replace=True,
+    )
+    vane.attach_function(
+        build_minio_object_bytes_udf(config.minio),
+        connection=connection,
+        alias="minio_object_bytes",
+        parameters=["VARCHAR", "VARCHAR"],
         replace=True,
     )
     if config.runner == "ray":
@@ -247,8 +315,23 @@ def build_local_evidence_ocr_results(
     }
 
 
-def _sql_stage_parts(path: Path) -> tuple[str, str]:
+def _render_sql(
+    path: Path,
+    replacements: Mapping[str, str] | None = None,
+) -> str:
     statement = path.read_text(encoding="utf-8")
+    for marker, replacement in (replacements or {}).items():
+        statement = statement.replace(marker, replacement)
+    if "__AI_" in statement or "__OCR_" in statement:
+        raise RuntimeError(f"unresolved AI SQL option in stage: {path}")
+    return statement
+
+
+def _sql_stage_parts(
+    path: Path,
+    replacements: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    statement = _render_sql(path, replacements)
     match = _CREATE_RELATION_AS.fullmatch(
         statement.strip().removesuffix(";").strip()
     )
@@ -265,6 +348,7 @@ def _execute_runner_sql_file(
     workspace: RunnerWorkspace,
     source_relations: tuple[str, ...],
     materializer: Callable[[Any], pa.Table],
+    replacements: Mapping[str, str] | None = None,
 ) -> None:
     """Run one SQL model through the active Vane Runner and register its result."""
 
@@ -276,11 +360,28 @@ def _execute_runner_sql_file(
             name,
             table,
         ).create_view(name, replace=True)
-    target, query = _sql_stage_parts(path)
+    target, query = _sql_stage_parts(path, replacements)
     register_or_replace_table(
         connection,
         target,
         materializer(runner_connection.sql(query)),
+    )
+
+
+def _create_empty_ai_attempt_2(connection: Any) -> None:
+    """Create the retry relation without scheduling ai_prompt for zero rows."""
+
+    connection.execute(
+        """
+        create or replace table int_evidence_ai_attempt_2 as
+        select
+          cast(project_id as varchar) as project_id,
+          cast(file_id as varchar) as file_id,
+          cast(role as varchar) as role,
+          cast(null as varchar) as raw_response
+        from int_evidence_ai_retry_inputs
+        where false
+        """
     )
 
 
@@ -299,7 +400,7 @@ def run_pipeline(
     configure_runner: Callable[..., Any] = vane.configure,
     runtime_probe: Callable[[RuntimeConfig], None] = probe_runtime,
     runtime_function_attacher: Callable[..., None] = attach_runtime_functions,
-    ai_relation_builder: Callable[..., Any] = build_evidence_ai_relation,
+    ai_health_probe: Callable[[Any], None] = probe_qwen,
     connection_factory: Callable[[], Any] = duckdb.connect,
     source_loader: Callable[[RuntimeConfig], SourceBundle] = read_source_bundle,
     local_ocr_result_builder: Callable[
@@ -348,30 +449,53 @@ def run_pipeline(
             _execute_sql_file(connection, EVIDENCE_OCR_STAGE)
             executed.append("int_evidence_ocr")
 
-            # Bind each qualified OCR record to one multimodal evidence request.
-            ocr_rows = _relation_rows(
+            # Build role-specific prompts and enforce complete OCR coverage in
+            # SQL before probing or scheduling either multimodal attempt.
+            ai_sql_replacements = _ai_sql_replacements(config)
+            _execute_sql_file(
                 connection,
-                "int_evidence_ocr",
-                order_by="file_id",
+                EVIDENCE_AI_INPUT_STAGE,
+                ai_sql_replacements,
             )
-            ai_table = ai_relation_builder(
-                ocr_rows,
-                connection,
-                source,
-                config,
-                request_relation_factory=lambda table: workspace.relation_from_table(
+            connection.execute(
+                "select count(*) from int_evidence_ai_inputs"
+            ).fetchone()
+            ai_health_probe(config.ai)
+            with _openai_api_key(config.ai.api_key):
+                _execute_runner_sql_file(
                     connection,
-                    "evidence_ai_request",
-                    table,
-                ),
-                response_materializer=relation_materializer,
-                result_factory=lambda table: table,
-            )
-            register_or_replace_table(
-                connection,
-                "int_evidence_ai",
-                ai_table,
-            )
+                    runner_connection,
+                    EVIDENCE_AI_ATTEMPT_1_STAGE,
+                    workspace=workspace,
+                    source_relations=("int_evidence_ai_inputs",),
+                    materializer=relation_materializer,
+                    replacements=ai_sql_replacements,
+                )
+                _execute_runner_sql_file(
+                    connection,
+                    runner_connection,
+                    EVIDENCE_AI_ATTEMPT_1_VALIDATION_UDF_STAGE,
+                    workspace=workspace,
+                    source_relations=("int_evidence_ai_attempt_1",),
+                    materializer=relation_materializer,
+                )
+                _execute_sql_file(connection, EVIDENCE_AI_RETRY_INPUT_STAGE)
+                retry_count = connection.execute(
+                    "select count(*) from int_evidence_ai_retry_inputs"
+                ).fetchone()[0]
+                if retry_count:
+                    _execute_runner_sql_file(
+                        connection,
+                        runner_connection,
+                        EVIDENCE_AI_ATTEMPT_2_STAGE,
+                        workspace=workspace,
+                        source_relations=("int_evidence_ai_retry_inputs",),
+                        materializer=relation_materializer,
+                        replacements=ai_sql_replacements,
+                    )
+                else:
+                    _create_empty_ai_attempt_2(connection)
+            _execute_sql_file(connection, EVIDENCE_AI_STAGE)
             executed.append("int_evidence_ai")
 
             # Bind model output to trusted metadata before remote validation.
@@ -384,7 +508,7 @@ def run_pipeline(
                 source_relations=("int_conflict_validation_inputs",),
                 materializer=relation_materializer,
             )
-            # Parse validated facts and apply the role contract in pure SQL.
+            # Parse the already JSON- and role-validated facts in pure SQL.
             _execute_sql_file(connection, CONFLICT_FACT_STAGE)
             executed.append("int_conflict_facts")
 

@@ -46,10 +46,9 @@ def _print_result(result: PipelineResult, *, runner: str) -> None:
     print("Vane capabilities exercised:")
     if runner == "local":
         print("  [driver OCR] RapidOCR results exposed through a Vane SQL Function")
-        print("  [Vane provider] Qwen multimodal fact extraction from PNG evidence")
     else:
         print("  [stateful UDF] RapidOCR engine reused across evidence images")
-        print("  [AI Function] Qwen multimodal fact extraction from PNG evidence")
+    print("  [SQL AI Function] ai_prompt extracts Qwen facts from PNG BLOBs")
     print("  [stateless UDF] Strict AI JSON contract validation")
     print("  [SQL] Score bias, winner impact, findings, and project summary")
 

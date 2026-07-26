@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import re
 import sys
@@ -19,7 +21,7 @@ from .config import DEFAULT_CONFIG_PATH, RuntimeConfig, load_runtime_config
 from .minio_store import MinioStore
 from .output_writer import replace_output_rows
 from .pg import connect_postgres, probe_postgres, read_claim_rows
-from .photo_ai import build_photo_ai_relation
+from .photo_ai import DAMAGE_SYSTEM_MESSAGE, probe_qwen
 from .vane_udfs import (
     DocumentOcrActor,
     build_minio_udfs,
@@ -49,6 +51,8 @@ DOCUMENT_FIELDS_UDF_STAGE = SQL_ROOT / "intermediate/int_claim_document_fields_u
 DOCUMENT_QUALITY_INPUT_STAGE = SQL_ROOT / "intermediate/int_claim_document_quality_inputs.sql"
 DOCUMENT_QUALITY_UDF_STAGE = SQL_ROOT / "intermediate/int_claim_document_quality_udf.sql"
 MATERIAL_FACT_STAGE = SQL_ROOT / "intermediate/int_claim_material_facts.sql"
+PHOTO_AI_INPUT_STAGE = SQL_ROOT / "intermediate/int_claim_photo_ai_inputs.sql"
+PHOTO_AI_STAGE = SQL_ROOT / "intermediate/int_claim_photo_ai.sql"
 DAMAGE_VALIDATION_INPUT_STAGE = SQL_ROOT / "intermediate/int_claim_damage_validation_inputs.sql"
 DAMAGE_VALIDATION_UDF_STAGE = SQL_ROOT / "intermediate/int_claim_damage_validation_udf.sql"
 DAMAGE_FACT_STAGE = SQL_ROOT / "intermediate/int_claim_damage_facts.sql"
@@ -110,8 +114,6 @@ def build_run_config_row(
         "ocr_device": config.ocr.device,
         "required_fields_json": stable_json(list(config.ocr.required_fields)),
         "minimum_text_confidence": config.ocr.minimum_text_confidence,
-        "ai_provider": config.ai.provider,
-        "ai_model": config.ai.model,
         "minio_bucket": config.minio.bucket,
     }
 
@@ -150,7 +152,41 @@ def _safe_identifier(value: str) -> str:
 
 
 def _sql_literal(value: Path) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
+    return _sql_string(str(value))
+
+
+def _sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _ai_sql_replacements(config: RuntimeConfig) -> dict[str, str]:
+    """Render constant, credential-free SQL options required by ai_prompt."""
+
+    return {
+        "__AI_PROVIDER_SQL__": _sql_string(config.ai.provider),
+        "__AI_MODEL_SQL__": _sql_string(config.ai.model),
+        "__AI_BASE_URL_SQL__": _sql_string(config.ai.base_url),
+        "__AI_TIMEOUT_SQL__": repr(config.ai.timeout_seconds),
+        "__AI_CONCURRENCY_SQL__": str(config.ai.concurrency),
+        "__AI_TEMPERATURE_SQL__": repr(config.ai.temperature),
+        "__AI_MAX_TOKENS_SQL__": str(config.ai.max_tokens),
+        "__AI_SYSTEM_MESSAGE_SQL__": _sql_string(DAMAGE_SYSTEM_MESSAGE),
+    }
+
+
+@contextmanager
+def _openai_api_key(value: str):
+    """Expose the configured credential to SQL AI actors without serializing it."""
+
+    previous_api_key = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = value
+    try:
+        yield
+    finally:
+        if previous_api_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = previous_api_key
 
 
 def register_or_replace_table(
@@ -255,8 +291,15 @@ def attach_local_document_ocr_lookup(
     )
 
 
-def _sql_stage_parts(path: Path) -> tuple[str, str]:
+def _sql_stage_parts(
+    path: Path,
+    replacements: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
     statement = path.read_text(encoding="utf-8")
+    for marker, replacement in (replacements or {}).items():
+        statement = statement.replace(marker, replacement)
+    if "__AI_" in statement:
+        raise RuntimeError(f"unresolved AI SQL option in stage: {path}")
     match = _CREATE_RELATION_AS.fullmatch(
         statement.strip().removesuffix(";").strip()
     )
@@ -273,6 +316,7 @@ def _execute_runner_sql_file(
     workspace: RunnerWorkspace,
     source_relations: Sequence[str],
     materializer: Callable[[Any], pa.Table],
+    replacements: Mapping[str, str] | None = None,
 ) -> None:
     """Run one SQL model through the active Vane Runner and register its result."""
 
@@ -284,11 +328,30 @@ def _execute_runner_sql_file(
             name,
             table,
         ).create_view(name, replace=True)
-    target, query = _sql_stage_parts(path)
+    target, query = _sql_stage_parts(path, replacements)
     register_or_replace_table(
         connection,
         target,
         materializer(runner_connection.sql(query)),
+    )
+
+
+def _create_empty_photo_ai(connection: Any) -> None:
+    """Create the AI relation without scheduling ai_prompt for zero photos."""
+
+    connection.execute(
+        """
+        create or replace table int_claim_photo_ai as
+        select
+          cast(claim_id as varchar) as claim_id,
+          cast(file_id as varchar) as file_id,
+          file_order,
+          cast(photo_sha256 as varchar) as photo_sha256,
+          cast(photo_quality_json as varchar) as photo_quality_json,
+          cast(null as varchar) as raw_damage_response
+        from int_claim_photo_ai_inputs
+        where false
+        """
     )
 
 
@@ -301,43 +364,6 @@ def _execute_sql_file(
     except OSError as exc:
         raise RuntimeError(f"cannot read SQL stage {path}: {exc}") from exc
     connection.execute(statement)
-
-
-def _relation_rows(
-    connection: Any,
-    relation_name: str,
-) -> list[dict[str, Any]]:
-    relation = connection.sql(f"select * from {_safe_identifier(relation_name)}")
-    columns = list(relation.columns)
-    return [dict(zip(columns, row)) for row in relation.fetchall()]
-
-
-def _create_photo_ai_table(
-    connection: Any,
-    config: RuntimeConfig,
-    *,
-    workspace: RunnerWorkspace,
-) -> None:
-    """Run multimodal inference and register its typed response relation."""
-
-    material_rows = _relation_rows(connection, "int_claim_material_facts")
-    table = build_photo_ai_relation(
-        material_rows,
-        connection,
-        config,
-        request_relation_factory=lambda value: workspace.relation_from_table(
-            connection,
-            "photo_ai_request",
-            value,
-        ),
-        response_materializer=materialize_relation,
-        result_factory=lambda value: value,
-    )
-    register_or_replace_table(
-        connection,
-        "int_claim_photo_ai",
-        table,
-    )
 
 
 def run_pipeline(
@@ -419,12 +445,26 @@ def run_pipeline(
             )
             # Aggregate the Runner outputs into the AI-ready claim contract.
             _execute_sql_file(connection, MATERIAL_FACT_STAGE)
-            # Bind verified MinIO photos to one multimodal request per image.
-            _create_photo_ai_table(
-                connection,
-                config,
-                workspace=workspace,
-            )
+            # Build one trusted SQL row per photo, then load verified image bytes
+            # and call the multimodal model as one Runner SQL relation.
+            _execute_sql_file(connection, PHOTO_AI_INPUT_STAGE)
+            photo_ai_count = connection.execute(
+                "select count(*) from int_claim_photo_ai_inputs"
+            ).fetchone()[0]
+            if photo_ai_count:
+                probe_qwen(config.ai)
+                with _openai_api_key(config.ai.api_key):
+                    _execute_runner_sql_file(
+                        connection,
+                        runner_connection,
+                        PHOTO_AI_STAGE,
+                        workspace=workspace,
+                        source_relations=("int_claim_photo_ai_inputs",),
+                        materializer=materialize_relation,
+                        replacements=_ai_sql_replacements(config),
+                    )
+            else:
+                _create_empty_photo_ai(connection)
             # Bind AI output in SQL, validate it through one direct Runner UDF,
             # then keep classification, rules, and marts in pure SQL stages.
             _execute_sql_file(connection, DAMAGE_VALIDATION_INPUT_STAGE)

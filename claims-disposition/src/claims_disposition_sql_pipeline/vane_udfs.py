@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import io
 import json
 import re
@@ -53,6 +54,7 @@ class MinioUdfs:
     object_exists: object
     object_sha256: object
     photo_quality: object
+    verified_object_bytes: object
 
 
 def stable_json(value: Any) -> str:
@@ -134,7 +136,27 @@ def build_minio_udfs(config: MinioConfig) -> MinioUdfs:
         value = MinioStore(config).get_bytes(bucket, object_key)
         return stable_json(analyze_photo_bytes(value))
 
-    return MinioUdfs(object_exists, object_sha256, photo_quality)
+    @vane.func(return_dtype="BLOB", name="verified_minio_object_bytes")
+    def verified_object_bytes(
+        bucket: str,
+        object_key: str,
+        expected_sha256: str,
+    ) -> bytes:
+        value = MinioStore(config).get_bytes(bucket, object_key)
+        actual_sha256 = hashlib.sha256(value).hexdigest()
+        if actual_sha256 != expected_sha256.lower():
+            raise ValueError(
+                f"MinIO object SHA-256 changed before AI inference: "
+                f"{bucket}/{object_key}"
+            )
+        return value
+
+    return MinioUdfs(
+        object_exists,
+        object_sha256,
+        photo_quality,
+        verified_object_bytes,
+    )
 
 
 def _normalized_label(value: str) -> str:
@@ -448,6 +470,11 @@ def stateless_udf_specs(minio_udfs: MinioUdfs) -> tuple[SqlUdfSpec, ...]:
             minio_udfs.photo_quality,
             "photo_quality_json",
             ("VARCHAR", "VARCHAR"),
+        ),
+        SqlUdfSpec(
+            minio_udfs.verified_object_bytes,
+            "verified_minio_object_bytes",
+            ("VARCHAR", "VARCHAR", "VARCHAR"),
         ),
         SqlUdfSpec(document_fields_json, "document_fields_json", ("VARCHAR",)),
         SqlUdfSpec(

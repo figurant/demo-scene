@@ -6,6 +6,8 @@ import pytest
 
 from procurement_audit_sql_demo.vane_functions import (
     AuditFactContractError,
+    try_validate_audit_fact_for_role_json_udf,
+    validate_audit_fact_for_role_json,
     validate_audit_fact_json,
 )
 
@@ -58,6 +60,36 @@ def test_validator_accepts_minutes_nullable_contract():
     assert result["participated"] is True
     assert result["recused"] is False
     assert result["supplier_name"] is None
+
+
+def test_role_validator_binds_document_type_to_trusted_evidence_role():
+    raw = json.dumps(VALID_RECOMMENDATION, ensure_ascii=False)
+
+    result = json.loads(
+        validate_audit_fact_for_role_json(raw, "expert_recommendation")
+    )
+
+    assert result["document_type"] == "recommendation_record"
+
+
+def test_role_validator_rejects_a_valid_document_for_the_wrong_role():
+    raw = json.dumps(VALID_RECOMMENDATION, ensure_ascii=False)
+
+    with pytest.raises(AuditFactContractError, match="does not match trusted"):
+        validate_audit_fact_for_role_json(raw, "committee_minutes")
+
+
+def test_try_role_validator_marks_contract_failure_for_one_retry():
+    validator = try_validate_audit_fact_for_role_json_udf.python_function
+
+    assert validator("not-json", "committee_minutes") == ""
+    assert (
+        validator(
+            json.dumps(VALID_MINUTES, ensure_ascii=False),
+            "committee_minutes",
+        )
+        is not None
+    )
 
 
 def test_validator_accepts_one_complete_qwen_json_fence():

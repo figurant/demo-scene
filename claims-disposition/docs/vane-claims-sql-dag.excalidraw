@@ -66,7 +66,7 @@
     },
     {
       "type": "text", "id": "claims_legend_ai_text", "x": 878, "y": 151, "width": 310, "height": 25,
-      "text": "Python / Vane AI relation", "originalText": "Python / Vane AI relation", "fontSize": 16, "fontFamily": 3, "textAlign": "left", "verticalAlign": "middle",
+      "text": "SQL / Vane AI relation", "originalText": "SQL / Vane AI relation", "fontSize": 16, "fontFamily": 3, "textAlign": "left", "verticalAlign": "middle",
       "strokeColor": "#374151", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
       "roughness": 0, "opacity": 100, "angle": 0, "seed": 711010, "version": 1, "versionNonce": 712010,
       "isDeleted": false, "groupIds": [], "boundElements": null, "link": null, "locked": false, "containerId": null, "lineHeight": 1.25
@@ -490,7 +490,7 @@
     },
     {
       "type": "text", "id": "claims_text_photo_ai", "x": 1890, "y": 1073, "width": 260, "height": 42,
-      "text": "int_claim_photo_ai\n(photo_ai.py / Vane AI)", "originalText": "int_claim_photo_ai\n(photo_ai.py / Vane AI)", "fontSize": 14, "fontFamily": 3, "textAlign": "center", "verticalAlign": "middle",
+      "text": "int_claim_photo_ai\n(SQL ai_prompt)", "originalText": "int_claim_photo_ai\n(SQL ai_prompt)", "fontSize": 14, "fontFamily": 3, "textAlign": "center", "verticalAlign": "middle",
       "strokeColor": "#374151", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid", "roughness": 0, "opacity": 100, "angle": 0,
       "seed": 715033, "version": 1, "versionNonce": 716033, "isDeleted": false, "groupIds": [], "boundElements": null, "link": null, "locked": false, "containerId": null, "lineHeight": 1.25
     },

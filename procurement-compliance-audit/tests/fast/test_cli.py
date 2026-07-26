@@ -55,7 +55,8 @@ def test_cli_prints_business_result_and_vane_capabilities(monkeypatch, capsys, t
     assert "PostgreSQL business rows + MinIO evidence objects" in output
     assert "Runner: local" in output
     assert "[driver OCR]" in output
-    assert "[Vane provider]" in output
+    assert "[SQL AI Function]" in output
+    assert "ai_prompt" in output
     assert "[stateless UDF]" in output
     assert "[SQL]" in output
 

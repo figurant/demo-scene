@@ -15,7 +15,7 @@ Winner recalculation: SUP-JW-001 -> SUP-ZJ-002
 
 ## 为什么使用 Vane
 
-Vane 是面向多模态数据的多模计算引擎，让评分表、文档图片、SQL、无状态 Python UDF、有状态 Actor 和 AI 模型在同一条可组合、可追踪的 Relation Pipeline 中协同执行。OCR Worker 使用 `@vane.cls` 注册，严格响应校验器使用 `@vane.func` 注册，Qwen 则通过 Vane AI API 调用。仓库默认使用 `local` Runner，同一套 fixture 已同时通过 Local 和 Ray 验证。Local 在 Driver 上创建一份 RapidOCR 引擎，对每个可信证据 locator 各执行一次，并把不可变结果暴露给 SQL；Ray 将 OCR Worker 挂载为有状态表达式，并通过 `vane.ai.prompt` 调用 Qwen。
+Vane 是面向多模态数据的多模计算引擎，让评分表、文档图片、SQL、无状态 Python UDF、有状态 Actor 和 AI 模型在同一条可组合、可追踪的 Relation Pipeline 中协同执行。OCR Worker 使用 `@vane.cls` 注册，严格响应校验器和图片加载器使用 `@vane.func` 注册，Qwen 则由 SQL `ai_prompt` AI Function 调用。仓库默认使用 `local` Runner，Local 与 Ray 使用相同的 SQL Relation 边界；Local 在 Driver 上创建 RapidOCR 引擎并把不可变结果暴露给 SQL，Ray 将 OCR Worker 挂载为有状态表达式。
 
 ## 架构
 
@@ -36,19 +36,19 @@ PostgreSQL 项目/供应商/评分/证据元数据 + MinIO 2 张 PNG 图片
 1. 从 PostgreSQL 读取项目、供应商、专家评分和证据文件元数据，并根据其中的 `bucket/object_key` 从 MinIO 读取推荐记录和评审会议纪要两张 PNG 图片。
 2. 校验项目、供应商、4 位专家对 3 家供应商的完整评分矩阵，以及证据角色和 MinIO locator，确保进入后续流程的数据结构完整且来源可信。
 3. 在 `int_evidence_ocr_udf.sql` 中直接调用 `evidence_ocr_json`，再由 `int_evidence_ocr.sql` 解析图片文字、OCR 状态和置信度；只有满足质量要求的证据才会进入多模态分析。Local 使用 Driver 持有的一份 RapidOCR 引擎与不可变结果查询，Ray 使用可复用的有状态 Actor；两条路径返回相同的 OCR JSON 合同。
-4. 将图片、OCR 文本和供应商上下文发送给 Qwen，提取“专家推荐了哪家供应商、是否参加评审、是否回避、对应证据原文和置信度”等结构化事实，并通过严格的 JSON 合同和证据角色进行校验。
+4. 在 SQL 中用 OCR 文本和供应商上下文构造按角色区分的 Prompt，要求所有可信证据图片都通过 OCR 门槛，把 MinIO 图片加载为 BLOB，再通过 SQL `ai_prompt` 调用 Qwen。SQL 会把 JSON/角色合同失败的首轮响应选入一次加强 Prompt 的重试；重试后仍不合规则由现有严格校验器终止运行。
 5. 使用确定性 SQL 对比相关专家评分与其他专家平均分，并分别计算包含和剔除该专家时的供应商排名，生成“存在关联且未回避”“评分显著偏高”“剔除该专家后中标结果改变”三类审计发现。
 6. 最终生成 `audit_findings.jsonl` 和 `audit_summary.jsonl`；证据充分时给出 `review_required` 及可复核的指标、阈值和证据引用，证据不足时明确标记为 `insufficient_evidence`，而不是让模型直接作出违规结论。
 
 ## 运行 Demo
 
-本 Demo 要求 CPython 3.12，并固定公共 PyPI 上的 `vane-ai==0.1.0a1`。该版本提供面向 CPython 3.10、3.11 和 3.12 的 `manylinux_2_28_x86_64` wheel（glibc 2.28 或更新），但 Launcher 只接受本 Demo 已验证的 CPython 3.12 运行时。先按照[完整运行手册](docs/runbook.zh-CN.md)创建环境，执行 `python -m pip install vane-ai` 安装 Vane，再执行 `python -m pip install -r requirements.txt` 安装 Demo，并准备正在运行的 PostgreSQL、MinIO 和本地 Qwen 服务，然后运行：
+本 Demo 要求 CPython 3.12，以及带图片能力的 `vane-ai==0.1.0a1` 构建，其 DuckDB engine 必须提供 `ai_prompt(VARCHAR, BLOB, STRUCT)`。Launcher 会固定已验证的 engine/source revision，并在启动前探测该重载。请按照[完整运行手册](docs/runbook.zh-CN.md)准备对应 Vane 环境、Demo 依赖、PostgreSQL、MinIO 和本地 Qwen，然后运行：
 
 ```bash
 python scripts/run_demo.py e2e
 ```
 
-`runtime.yml` 默认是 `runner: local`。如需验证分布式 Actor 和 AI Relation 路径，可改为 `runner: ray` 并连接 Ray 集群；两种模式都已使用真实 fixture、OCR 和 Qwen 服务跑通。
+`runtime.yml` 默认是 `runner: local`。如需验证分布式 Actor 和 AI Relation 路径，可改为 `runner: ray` 并连接 Ray 集群。两种模式使用相同 SQL 合同；目标 Ray 集群仍需单独做基础设施 smoke test。
 
 `e2e` 先把仓库中的合成 seed 数据写入 PostgreSQL/MinIO，再让 pipeline 只从这两个服务读取输入，并执行真实 OCR 和 Qwen 推理。没有 AI mock fallback。运行后生成：
 
@@ -59,11 +59,11 @@ output/audit_summary.jsonl   # 1 行
 
 ## 实现文件组织与 Vane 使用位置
 
-下图包含全部 10 个 SQL 文件。实线表示主执行流，虚线表示对可信运行时数据的其他跨阶段直接依赖。
+SQL 目录目前包含 16 个文件；下图概括核心依赖流。实线表示主执行流，虚线表示对可信运行时数据的其他跨阶段直接依赖。
 
 ![采购合规审计 SQL 依赖 DAG](docs/vane-procurement-audit-sql-dag.png)
 
-紫色的 `int_evidence_ai` 节点不是 SQL 文件：`ai.py` 将通过门槛的 OCR、可信来源元数据、MinIO 图片字节和供应商别名组合起来，通过 Vane AI 创建该 Relation，再交回 SQL 校验链路。
+`int_evidence_ai_inputs.sql` 把合格 OCR、可信元数据和供应商别名组合起来，并强制证据完整覆盖。首轮从 MinIO 加载图片 BLOB 并调用多模态 `ai_prompt`；直接校验投影只选出合同失败的响应，重试则复用首轮暂存的完全相同图片字节。`int_evidence_ai.sql` 决定最终响应后，再进入保持不变的严格校验和业务规则链。
 
 ```text
 ./
@@ -125,14 +125,11 @@ output/audit_summary.jsonl   # 1 行
 │   │
 │   ├── vane_functions.py
 │   │   # OCR 输出规范化和严格的 AI JSON/文档类型合同校验。
-│   │   └── 【Vane】@vane.func 定义 validate_audit_fact_json；
-│   │       @vane.cls 定义 EvidenceOcrActor，Local 在 Driver 实例化，Ray 挂载执行。
+│   │   └── 【Vane】@vane.func 定义严格/尝试校验器和 MinIO BLOB Loader；
+│   │       @vane.cls 定义 EvidenceOcrActor。
 │   │
 │   ├── ai.py
-│   │   # 将 OCR 文本、供应商别名和图片组合成多模态请求，
-│   │   # 校验模型事实必须与可信证据角色一致，合同失败时重试一次。
-│   │   └── 【Vane】Local 使用 vane.ai.load_provider，并在 Driver 复用一份
-│   │       异步 Prompter；Ray 使用 vane.ai.prompt 和 Runner 物化。
+│   │   # 定义不可变的审计事实 Schema/System Message 和 Qwen 启动探针。
 │   │
 │   ├── sql/
 │   │   ├── staging/
@@ -146,6 +143,18 @@ output/audit_summary.jsonl   # 1 行
 │   │   │   │   # 通过直接 Runner SQL，对每张暂存证据图片调用 evidence_ocr_json。
 │   │   │   ├── int_evidence_ocr.sql
 │   │   │   │   # 将 Runner 生成的 JSON 解析成类型明确的 OCR 状态、文本、置信度和行数，并保留原始响应。
+│   │   │   ├── int_evidence_ai_inputs.sql
+│   │   │   │   # 构造按角色区分的 Prompt，并在任一可信图片未通过 OCR 时失败。
+│   │   │   ├── int_evidence_ai_attempt_1.sql
+│   │   │   │   # 加载逐张 MinIO 图片 BLOB，并进行首轮多模态 ai_prompt 调用。
+│   │   │   ├── int_evidence_ai_attempt_1_validation_udf.sql
+│   │   │   │   # 用非抛错 JSON/角色校验器选出需要重试的响应。
+│   │   │   ├── int_evidence_ai_retry_inputs.sql
+│   │   │   │   # 只为首轮失败行追加合同加强指令。
+│   │   │   ├── int_evidence_ai_attempt_2.sql
+│   │   │   │   # 复用首轮完全相同的图片 BLOB，通过 ai_prompt 进行一次语义重试。
+│   │   │   ├── int_evidence_ai.sql
+│   │   │   │   # 选择合规首轮响应，否则要求使用重试响应。
 │   │   │   ├── int_conflict_validation_inputs.sql
 │   │   │   │   # 将每个 Vane AI 响应重新关联到 PostgreSQL 中可信的项目、文件和证据角色身份。
 │   │   │   ├── int_conflict_validation_udf.sql
@@ -171,7 +180,7 @@ output/audit_summary.jsonl   # 1 行
     # 覆盖来源合同、OCR Actor、AI 合同、SQL DAG、Runner 编排和输出发布。
 ```
 
-执行主线是 `run_demo.py → cli.py → source_data.py → pipeline.py → Vane OCR/AI/校验 → SQL Relations → verify_outputs.py → output_writer.py`。Driver 读取 PostgreSQL/MinIO、校验 Arrow `SourceBundle`、持有纯 SQL DuckDB Catalog、验证 Fixture 结果并发布 JSONL。对于 OCR 与响应校验的 `*_udf.sql` 投影，`pipeline.py` 将 Driver 输入临时落为 Parquet，通过所选 Vane Runner 执行，再把物化结果注册回 Driver Catalog。Local 使用 Driver 持有的一份 OCR 实现和一份复用的 Vane Provider Prompter，生成 OCR 查询与 AI 响应表；Ray 挂载 OCR Actor，并通过 `vane.ai.prompt` 执行 AI。下游 SQL 保持相同的解析、可信角色过滤、评分偏差、排名变化和审计规则合同。
+执行主线是 `run_demo.py → cli.py → source_data.py → pipeline.py → Vane OCR/SQL ai_prompt/校验 → SQL Relations → verify_outputs.py → output_writer.py`。Driver 读取 PostgreSQL/MinIO、校验 Arrow `SourceBundle`、持有纯 SQL DuckDB Catalog、验证 Fixture 结果并发布 JSONL。`pipeline.py` 将 Driver 输入临时落为 Parquet，通过所选 Vane Runner 执行直接 OCR、两轮 AI 和响应校验 SQL 投影，再把物化结果注册回 Driver Catalog。Local 使用 Driver 持有的不可变 OCR 查询，Ray 挂载 OCR Actor；两条路径执行同一段图片 BLOB `ai_prompt` SQL。下游解析、可信角色强校验、评分偏差、排名变化和审计规则合同保持不变。
 
 ## 审计逻辑与边界
 
@@ -181,7 +190,7 @@ output/audit_summary.jsonl   # 1 行
 2. `EXP-002-score-bias`：对相关供应商的得分比 peers 至少高 15 分。
 3. `EXP-003-award-impact`：剔除该专家后 winner 改变。
 
-两张图片都必须通过 OCR 并真实调用 Qwen。响应合同不合规时运行失败；响应合规但置信度不足时不生成 finding，并将 summary 标记为 `insufficient_evidence`。
+两张可信图片都必须 OCR 成功、文本非空且达到配置门槛；OCR 覆盖不完整会在调用 Qwen 前失败，且不发布输出。首轮 JSON/角色合同失败时，会针对同一图片用加强 Prompt 重试一次；重试后仍不合规则运行失败。响应合规但 AI 置信度不足时不生成 finding，并将 summary 标记为 `insufficient_evidence`。
 
 ## 适配到你的环境
 

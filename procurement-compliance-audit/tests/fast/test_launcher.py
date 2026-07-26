@@ -39,8 +39,8 @@ def test_launcher_freezes_exact_runtime_identifiers():
     assert launcher.EXPECTED_VANE_DISTRIBUTION_VERSION == "0.1.0a1"
     assert launcher.EXPECTED_VANE_API_VERSION == "0.1.0a1"
     assert launcher.EXPECTED_DUCKDB_PYTHON_VERSION == "0.1.0a1"
-    assert launcher.EXPECTED_DUCKDB_ENGINE_VERSION == "v1.6.0-dev1"
-    assert launcher.EXPECTED_DUCKDB_SOURCE_REVISION == "398033a962"
+    assert launcher.EXPECTED_DUCKDB_ENGINE_VERSION == "v1.6.0-dev2"
+    assert launcher.EXPECTED_DUCKDB_SOURCE_REVISION == "b1e6e66d56"
     assert launcher.INSTALL_HINT == "python -m pip install vane-ai"
     assert launcher.DEFAULT_VANE_UDF_UNREGISTER_TIMEOUT_MS == "60000"
 
@@ -54,8 +54,8 @@ def test_launcher_freezes_exact_runtime_identifiers():
                 "wrong",
                 "0.1.0a1",
                 "0.1.0a1",
-                "v1.6.0-dev1",
-                "398033a962",
+                "v1.6.0-dev2",
+                "b1e6e66d56",
             ),
         ),
         (
@@ -64,8 +64,8 @@ def test_launcher_freezes_exact_runtime_identifiers():
                 "0.1.0a1",
                 "wrong",
                 "0.1.0a1",
-                "v1.6.0-dev1",
-                "398033a962",
+                "v1.6.0-dev2",
+                "b1e6e66d56",
             ),
         ),
         (
@@ -74,8 +74,8 @@ def test_launcher_freezes_exact_runtime_identifiers():
                 "0.1.0a1",
                 "0.1.0a1",
                 "wrong",
-                "v1.6.0-dev1",
-                "398033a962",
+                "v1.6.0-dev2",
+                "b1e6e66d56",
             ),
         ),
         (
@@ -85,7 +85,7 @@ def test_launcher_freezes_exact_runtime_identifiers():
                 "0.1.0a1",
                 "0.1.0a1",
                 "wrong",
-                "398033a962",
+                "b1e6e66d56",
             ),
         ),
         (
@@ -94,7 +94,7 @@ def test_launcher_freezes_exact_runtime_identifiers():
                 "0.1.0a1",
                 "0.1.0a1",
                 "0.1.0a1",
-                "v1.6.0-dev1",
+                "v1.6.0-dev2",
                 "wrong",
             ),
         ),
@@ -105,6 +105,25 @@ def test_launcher_rejects_any_runtime_version_mismatch(field, actual):
 
     with pytest.raises(RuntimeError, match=field):
         launcher.validate_runtime_versions(*actual)
+
+
+def test_launcher_rejects_runtime_without_sql_image_ai_prompt():
+    launcher = _load_launcher()
+
+    with pytest.raises(RuntimeError, match="SQL ai_prompt image capability"):
+        launcher.validate_ai_prompt_image_sql(
+            type(
+                "DuckDbWithoutImagePrompt",
+                (),
+                {
+                    "connect": staticmethod(
+                        lambda: (_ for _ in ()).throw(
+                            RuntimeError("no matching overload")
+                        )
+                    )
+                },
+            )
+        )
 
 
 def test_launcher_public_entry_is_the_only_script():

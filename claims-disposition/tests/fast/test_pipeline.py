@@ -152,12 +152,6 @@ def test_claim_damage_sql_owns_validation_classification_and_aggregation():
 
 def test_claim_damage_runner_validation_feeds_pure_sql_rules(tmp_path):
     photo_sha256 = "1" * 64
-    photo_input = {
-        "file_id": "PHOTO-001",
-        "file_order": 1,
-        "sha256": photo_sha256,
-        "photo_quality": {"photo_usable": True},
-    }
     raw_response = stable_json(
         {
             "vehicle_visible": True,
@@ -178,12 +172,21 @@ def test_claim_damage_runner_validation_feeds_pure_sql_rules(tmp_path):
         pipeline.register_or_replace_table(
             connection,
             "int_claim_material_facts",
+            pa.Table.from_pylist([{"claim_id": "CLM-001"}]),
+        )
+        pipeline.register_or_replace_table(
+            connection,
+            "int_claim_photo_ai_inputs",
             pa.Table.from_pylist(
                 [
                     {
                         "claim_id": "CLM-001",
-                        "model_input_usable": True,
-                        "usable_photo_inputs_json": stable_json([photo_input]),
+                        "file_id": "PHOTO-001",
+                        "file_order": 1,
+                        "photo_sha256": photo_sha256,
+                        "photo_quality_json": stable_json(
+                            {"photo_usable": True}
+                        ),
                     }
                 ]
             ),

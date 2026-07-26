@@ -60,9 +60,9 @@ def test_runbooks_document_a_fresh_environment_and_all_services():
         "127.0.0.1:5432",
         "127.0.0.1:9000",
         "127.0.0.1:8001",
-        "v1.6.0-dev1",
-        "398033a962",
-        "vane.ai.load_provider",
+        "v1.6.0-dev2",
+        "b1e6e66d56",
+        "ai_prompt(NULL, NULL::BLOB, NULL)",
     )
     obsolete_index = ".".join(("test", "pypi", "org"))
     for name in ("docs/runbook.md", "docs/runbook.zh-CN.md"):

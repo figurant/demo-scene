@@ -11,8 +11,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER_PATH = PROJECT_ROOT / "scripts/run_demo.py"
 VANE_VERSION = "0.1.0a1"
-DUCKDB_ENGINE_VERSION = "v1.6.0-dev1"
-DUCKDB_SOURCE_REVISION = "398033a962"
+DUCKDB_ENGINE_VERSION = "v1.6.0-dev2"
+DUCKDB_SOURCE_REVISION = "b1e6e66d56"
 
 
 def _load_launcher():
@@ -30,7 +30,6 @@ def _complete_vane_api() -> SimpleNamespace:
         cls=lambda: None,
         attach_function=lambda: None,
         configure=lambda: None,
-        ai=SimpleNamespace(prompt=lambda: None, load_provider=lambda: None),
     )
 
 
@@ -151,27 +150,36 @@ def test_launcher_rejects_missing_callable_api():
         )
 
 
-def test_launcher_rejects_missing_ai_prompt():
+def test_launcher_accepts_sql_image_ai_prompt_capability():
     launcher = _load_launcher()
-    vane_without_prompt = _complete_vane_api()
-    vane_without_prompt.ai = SimpleNamespace()
 
-    with pytest.raises(RuntimeError, match=r"vane\.ai\.prompt"):
-        launcher.validate_runtime_api(
-            vane_without_prompt,
-            SimpleNamespace(ray_cxx=True),
-        )
+    class Result:
+        def fetchall(self):
+            return [(None,)]
+
+    class Connection:
+        def execute(self, statement):
+            assert statement == "select ai_prompt(NULL, NULL::BLOB, NULL)"
+            return Result()
+
+        def close(self):
+            pass
+
+    launcher.validate_ai_prompt_image_sql(
+        SimpleNamespace(connect=lambda: Connection())
+    )
 
 
-def test_launcher_rejects_missing_ai_provider_loader():
+def test_launcher_rejects_runtime_without_sql_image_ai_prompt():
     launcher = _load_launcher()
-    vane_without_loader = _complete_vane_api()
-    vane_without_loader.ai = SimpleNamespace(prompt=lambda: None)
 
-    with pytest.raises(RuntimeError, match=r"vane\.ai\.load_provider"):
-        launcher.validate_runtime_api(
-            vane_without_loader,
-            SimpleNamespace(ray_cxx=True),
+    with pytest.raises(RuntimeError, match="SQL ai_prompt image capability"):
+        launcher.validate_ai_prompt_image_sql(
+            SimpleNamespace(
+                connect=lambda: (_ for _ in ()).throw(
+                    RuntimeError("no matching overload")
+                )
+            )
         )
 
 

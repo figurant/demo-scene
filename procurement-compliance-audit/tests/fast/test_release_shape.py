@@ -26,7 +26,16 @@ def test_release_shape_is_deliberately_small():
         "project.json",
     ]
     assert len(CORE_RELATIONS) == 8
-    assert len(list((PROJECT_ROOT / "src/procurement_audit_sql_demo/sql").rglob("*.sql"))) == 10
+    assert (
+        len(
+            list(
+                (
+                    PROJECT_ROOT / "src/procurement_audit_sql_demo/sql"
+                ).rglob("*.sql")
+            )
+        )
+        == 16
+    )
     assert EXPECTED_RULES == {
         "EXP-001-conflict-not-recused",
         "EXP-002-score-bias",
@@ -88,7 +97,7 @@ def test_readme_and_runbook_cover_story_execution_and_vane_capabilities():
             "Qwen2.5-VL-3B-Instruct",
             "runner: local",
             "runner: ray",
-            "vane.ai.load_provider",
+            "ai_prompt(NULL, NULL::BLOB, NULL)",
         ):
             assert required in runbook, f"{name} is missing {required!r}"
         assert obsolete_index not in runbook.lower()
@@ -121,7 +130,7 @@ def test_readme_and_runbook_cover_story_execution_and_vane_capabilities():
             assert required in runbook
     assert "@vane.cls" in readme
     assert "@vane.func" in readme
-    assert "vane.ai.prompt" in readme
+    assert "ai_prompt" in readme
     assert "AI Function" in readme
     assert "SUP-JW-001" in readme and "SUP-ZJ-002" in readme
 

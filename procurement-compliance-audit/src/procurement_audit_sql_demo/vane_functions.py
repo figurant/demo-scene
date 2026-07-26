@@ -28,6 +28,10 @@ AI_FACT_FIELDS = frozenset(
     }
 )
 _DOCUMENT_TYPES = {"recommendation_record", "committee_minutes"}
+_DOCUMENT_TYPE_BY_ROLE = {
+    "expert_recommendation": "recommendation_record",
+    "committee_minutes": "committee_minutes",
+}
 _EXPERT_ID = re.compile(r"^EXP-[0-9]{3}$")
 _EVIDENCE_PLACEHOLDERS = {"图片原文", "证据原文", "原文", "n/a", "unknown"}
 _JSON_FENCE = re.compile(
@@ -178,9 +182,57 @@ def validate_audit_fact_json(raw_response: str) -> str:
     )
 
 
-@vane.func(return_dtype="VARCHAR", name="validate_audit_fact_json")
-def validate_audit_fact_json_udf(raw_response: str) -> str:
-    return validate_audit_fact_json(raw_response)
+def validate_audit_fact_for_role_json(raw_response: str, role: str) -> str:
+    """Validate one response and bind its document type to trusted metadata."""
+
+    fact_json = validate_audit_fact_json(raw_response)
+    expected_document_type = _DOCUMENT_TYPE_BY_ROLE.get(role)
+    if expected_document_type is None:
+        raise AuditFactContractError(f"unsupported trusted evidence role: {role}")
+    document_type = json.loads(fact_json)["document_type"]
+    if document_type != expected_document_type:
+        raise AuditFactContractError(
+            f"document_type {document_type!r} does not match trusted "
+            f"evidence role {role!r}"
+        )
+    return fact_json
+
+
+@vane.func(
+    return_dtype="VARCHAR",
+    name="validate_audit_fact_for_role_json",
+)
+def validate_audit_fact_for_role_json_udf(
+    raw_response: str,
+    role: str,
+) -> str:
+    return validate_audit_fact_for_role_json(raw_response, role)
+
+
+@vane.func(
+    return_dtype="VARCHAR",
+    name="try_validate_audit_fact_for_role_json",
+)
+def try_validate_audit_fact_for_role_json_udf(
+    raw_response: str,
+    role: str,
+) -> str:
+    """Return canonical JSON for a valid first attempt, else an empty marker."""
+
+    try:
+        return validate_audit_fact_for_role_json(raw_response, role)
+    except AuditFactContractError:
+        return ""
+
+
+def build_minio_object_bytes_udf(config: MinioConfig):
+    """Build the SQL-callable MinIO image loader used by ai_prompt."""
+
+    @vane.func(return_dtype="BLOB", name="minio_object_bytes")
+    def minio_object_bytes(bucket: str, object_key: str) -> bytes:
+        return MinioStore(config).get_bytes(bucket, object_key)
+
+    return minio_object_bytes
 
 
 def build_rapidocr():

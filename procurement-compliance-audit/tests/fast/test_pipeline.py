@@ -9,11 +9,14 @@ import pyarrow.parquet as pq
 import pytest
 
 from procurement_audit_sql_demo import pipeline
-from procurement_audit_sql_demo.ai import EvidenceAiInputError, build_evidence_ai_relation
 from procurement_audit_sql_demo.config import load_runtime_config
 from procurement_audit_sql_demo.fixture_loader import build_fixture
 from procurement_audit_sql_demo.pipeline import CORE_RELATIONS, run_pipeline
-from procurement_audit_sql_demo.vane_functions import stable_json, validate_audit_fact_json
+from procurement_audit_sql_demo.vane_functions import (
+    AuditFactContractError,
+    stable_json,
+    validate_audit_fact_for_role_json,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -91,6 +94,29 @@ def _fixed_ai_table() -> pa.Table:
     )
 
 
+def _fixed_ai_attempt_table(*, invalid_recommendation: bool = False) -> pa.Table:
+    role_by_file = {
+        "EVD-REC-001": "expert_recommendation",
+        "EVD-MIN-001": "committee_minutes",
+    }
+    rows = []
+    for row in _fixed_ai_table().to_pylist():
+        rows.append(
+            {
+                **row,
+                "role": role_by_file[row["file_id"]],
+                "image_bytes": b"\x89PNG fixture image",
+                "raw_response": (
+                    "not-json"
+                    if invalid_recommendation
+                    and row["file_id"] == "EVD-REC-001"
+                    else row["raw_response"]
+                ),
+            }
+        )
+    return pa.Table.from_pylist(rows)
+
+
 def test_source_loader_reads_postgres_snapshot(monkeypatch):
     config = load_runtime_config(PROJECT_ROOT / "runtime.yml")
     expected, _store = _source_and_store()
@@ -128,7 +154,7 @@ def test_source_loader_reads_postgres_snapshot(monkeypatch):
     assert events == ["procurement_audit_raw", "postgres:enter", "postgres:exit"]
 
 
-def test_pipeline_runs_eight_relations_and_publishes(tmp_path):
+def test_pipeline_runs_eight_relations_and_publishes(tmp_path, monkeypatch):
     config = replace(
         load_runtime_config(PROJECT_ROOT / "runtime.yml"),
         output_dir=tmp_path / "output",
@@ -162,36 +188,87 @@ def test_pipeline_runs_eight_relations_and_publishes(tmp_path):
             "VARCHAR",
         )
         connection.create_function(
-            "validate_audit_fact_json",
-            validate_audit_fact_json,
-            ["VARCHAR"],
+            "try_validate_audit_fact_for_role_json",
+            lambda raw_response, role: _try_validate_for_role(
+                raw_response,
+                role,
+            ),
+            ["VARCHAR", "VARCHAR"],
+            "VARCHAR",
+        )
+        connection.create_function(
+            "validate_audit_fact_for_role_json",
+            validate_audit_fact_for_role_json,
+            ["VARCHAR", "VARCHAR"],
             "VARCHAR",
         )
 
-    def build_ai(
-        ocr_rows,
+    execute_runner_sql_file = pipeline._execute_runner_sql_file
+
+    def execute_runner_stage(
         connection,
-        source_bundle,
-        runtime_config,
-        **_kwargs,
+        runner_connection,
+        path,
+        **kwargs,
     ):
-        events.append(f"ai:{len(ocr_rows)}")
-        assert runtime_config is config
-        assert {row["file_id"] for row in ocr_rows} == {"EVD-REC-001", "EVD-MIN-001"}
-        return _fixed_ai_table()
+        if path == pipeline.EVIDENCE_AI_ATTEMPT_1_STAGE:
+            rows = connection.sql(
+                "select file_id from int_evidence_ai_inputs order by file_id"
+            ).fetchall()
+            events.append(f"ai:{len(rows)}")
+            assert {row[0] for row in rows} == {"EVD-REC-001", "EVD-MIN-001"}
+            pipeline.register_or_replace_table(
+                connection,
+                "int_evidence_ai_attempt_1",
+                _fixed_ai_attempt_table(invalid_recommendation=True),
+            )
+            return
+        if path == pipeline.EVIDENCE_AI_ATTEMPT_2_STAGE:
+            retry_rows = connection.sql(
+                "select file_id, image_bytes "
+                "from int_evidence_ai_retry_inputs"
+            ).fetchall()
+            events.append(f"retry:{len(retry_rows)}")
+            assert retry_rows == [
+                ("EVD-REC-001", b"\x89PNG fixture image")
+            ]
+            pipeline.register_or_replace_table(
+                connection,
+                "int_evidence_ai_attempt_2",
+                _fixed_ai_attempt_table().slice(0, 1),
+            )
+            return
+        execute_runner_sql_file(
+            connection,
+            runner_connection,
+            path,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_execute_runner_sql_file",
+        execute_runner_stage,
+    )
 
     result = run_pipeline(
         config,
         configure_runner=configure_runner,
         runtime_probe=lambda _config: None,
         runtime_function_attacher=attach_functions,
-        ai_relation_builder=build_ai,
+        ai_health_probe=lambda _config: events.append("health"),
         source_loader=lambda _config: source,
         local_ocr_result_builder=lambda _source, _config: {},
         relation_materializer=lambda relation: relation.to_arrow_table(),
     )
 
-    assert events == ["configure:local", "attach_functions", "ai:2"]
+    assert events == [
+        "configure:local",
+        "attach_functions",
+        "health",
+        "ai:2",
+        "retry:1",
+    ]
     assert len(ocr_calls) == 2
     assert all(object_key.endswith(".png") for object_key in ocr_calls)
     assert result.executed_relations == CORE_RELATIONS
@@ -208,14 +285,15 @@ def test_pipeline_runs_eight_relations_and_publishes(tmp_path):
     )["flagged_expert_id"] == "EXP-001"
 
 
-def test_pipeline_does_not_publish_when_ocr_coverage_is_incomplete(
+def test_pipeline_fails_before_ai_when_ocr_coverage_is_incomplete(
     tmp_path,
 ):
     config = replace(
         load_runtime_config(PROJECT_ROOT / "runtime.yml"),
         output_dir=tmp_path / "output",
     )
-    source, store = _source_and_store()
+    source, _store = _source_and_store()
+    health_calls = []
 
     def attach_functions(connection, _config, _local_ocr_results):
         def evidence_ocr(_bucket, object_key):
@@ -245,39 +323,25 @@ def test_pipeline_does_not_publish_when_ocr_coverage_is_incomplete(
             ["VARCHAR", "VARCHAR"],
             "VARCHAR",
         )
-        connection.create_function(
-            "validate_audit_fact_json",
-            validate_audit_fact_json,
-            ["VARCHAR"],
-            "VARCHAR",
-        )
-
-    def build_ai(
-        ocr_rows,
-        connection,
-        source_bundle,
-        runtime_config,
-        **kwargs,
-    ):
-        return build_evidence_ai_relation(
-            ocr_rows,
-            connection,
-            source_bundle,
-            runtime_config,
-            object_store=store,
-            **kwargs,
-        )
-
-    with pytest.raises(EvidenceAiInputError, match="EVD-MIN-001"):
+    with pytest.raises(Exception, match="coverage must match"):
         run_pipeline(
             config,
             configure_runner=lambda **_kwargs: None,
             runtime_probe=lambda _config: None,
             runtime_function_attacher=attach_functions,
-            ai_relation_builder=build_ai,
+            ai_health_probe=lambda _config: health_calls.append("health"),
             source_loader=lambda _config: source,
             local_ocr_result_builder=lambda _source, _config: {},
             relation_materializer=lambda relation: relation.to_arrow_table(),
         )
 
-    assert not config.output_dir.exists()
+    assert health_calls == []
+    assert not (tmp_path / "output/audit_findings.jsonl").exists()
+    assert not (tmp_path / "output/audit_summary.jsonl").exists()
+
+
+def _try_validate_for_role(raw_response: str, role: str) -> str:
+    try:
+        return validate_audit_fact_for_role_json(raw_response, role)
+    except AuditFactContractError:
+        return ""

@@ -17,7 +17,7 @@ The synthetic fixture covers four workflow outcomes:
 
 ## Why Vane
 
-Vane is a multi-compute engine for multimodal data: it lets structured records, documents, images, SQL, stateless Python UDFs, stateful actors, and AI models work together in one composable and traceable Relation pipeline. Vane also separates pipeline logic from execution backends. The checked-in configuration defaults to the `local` Runner, and the same fixture is verified on both Local and Ray. Local creates one RapidOCR engine on the driver, processes each eligible supporting-document locator once, and exposes the immutable results to SQL; Ray initializes the native ONNX engine inside an isolated stateful Actor worker.
+Vane is a multi-compute engine for multimodal data: it lets structured records, documents, images, SQL, stateless Python UDFs, stateful actors, and AI models work together in one composable and traceable Relation pipeline. Vane also separates pipeline logic from execution backends. The checked-in configuration defaults to the `local` Runner, while Local and Ray share the same relation contracts. Local creates one RapidOCR engine on the driver, processes each eligible supporting-document locator once, and exposes the immutable results to SQL; Ray initializes the native ONNX engine inside an isolated stateful Actor worker. In both modes, Vane SQL loads each verified image as a BLOB and calls multimodal `ai_prompt` directly.
 
 ## Architecture
 
@@ -49,19 +49,19 @@ stg_claims / stg_claim_materials / stg_run_config
 1. Reads four synthetic claims and their material metadata from PostgreSQL, then follows the stored MinIO locators to read vehicle-damage photos and supporting claim documents; the runtime never reads local fixture files directly.
 2. Validates each material's file identity, order, role, media type, bucket, and canonical object path, then checks MinIO object existence and computes SHA-256 so that incorrect or replaced files cannot enter automated processing.
 3. Calls `document_ocr_json` directly in `int_claim_document_ocr_udf.sql`, then lets downstream SQL extract claim number, claimant name, and loss date and determine whether the materials are complete, legible, and consistent with the current claim. Local runs one driver-owned RapidOCR engine and attaches an immutable result lookup; Ray attaches the reusable stateful Actor. Both paths return the same OCR JSON contract to SQL.
-4. Sends only photos that pass completeness, quality, and hash validation to Qwen, which extracts structured facts including target-vehicle clarity, visible damage, damaged parts, damage types, severity, confidence, and uncertainty reasons.
+4. Builds one trusted SQL row per photo that passes completeness, quality, and hash validation, rechecks the object SHA-256 while loading its BLOB, and calls Qwen through SQL `ai_prompt` to extract target-vehicle clarity, visible damage, damaged parts, damage types, severity, confidence, and uncertainty reasons.
 5. Enforces the model-response contract in the direct Runner projection `int_claim_damage_validation_udf.sql`, then uses pure SQL to aggregate every photo result for each claim and identify failures, conflicting evidence, unclear target vehicles, insufficient confidence, and high-severity risks.
 6. Applies deterministic SQL precedence for requesting more materials, manual review, denial candidates, and payment candidates; validates the nine-column output contract; and writes the result to PostgreSQL in one transaction. The built-in fixture verifies that all four workflow outcomes remain reproducible.
 
 ## Run the demo
 
-This demo requires CPython 3.12 and pins the public PyPI release `vane-ai==0.1.0a1`. The release provides CPython 3.10, 3.11, and 3.12 `manylinux_2_28_x86_64` wheels (glibc 2.28 or newer), but the launcher accepts only this demo's validated CPython 3.12 runtime. Follow the [complete runbook](docs/runbook.md) to create the environment, install Vane with `python -m pip install vane-ai`, install the demo with `python -m pip install -r requirements.txt`, and prepare running PostgreSQL, MinIO, and Qwen services. Then run:
+This demo requires CPython 3.12 and an image-capable `vane-ai==0.1.0a1` build whose DuckDB engine exposes `ai_prompt(VARCHAR, BLOB, STRUCT)`. The launcher pins the verified engine/source revision and probes that overload before starting. Follow the [complete runbook](docs/runbook.md) to prepare that Vane environment, install the demo dependencies, and start PostgreSQL, MinIO, and Qwen. Then run:
 
 ```bash
 python scripts/run_demo.py e2e
 ```
 
-`runtime.yml` defaults to `runner: local`. Set it to `runner: ray` and connect a Ray cluster to exercise the distributed Actor and AI Relation path; both modes have been verified with the real fixture, OCR, and Qwen service.
+`runtime.yml` defaults to `runner: local`. Set it to `runner: ray` and connect a Ray cluster to exercise the distributed Actor and AI Relation path. Both modes use the same SQL contracts; a target Ray cluster still needs its own infrastructure smoke test.
 
 A successful run prints:
 
@@ -75,11 +75,11 @@ There is no AI mock fallback: unavailable services, unreadable images, invalid A
 
 ## Implementation layout and where Vane is used
 
-The DAG includes all 18 SQL files. Solid arrows show the main execution flow; dashed arrows show additional direct dependencies that cross phases.
+The DAG includes all 20 SQL files. Solid arrows show the main execution flow; dashed arrows show additional direct dependencies that cross phases.
 
 ![Claims disposition SQL dependency DAG](docs/vane-claims-sql-dag.png)
 
-The purple `int_claim_photo_ai` node is not a SQL file: `photo_ai.py` creates that relation through Vane AI, after which the result re-enters the SQL DAG for trusted identity binding and Runner validation.
+`int_claim_photo_ai_inputs.sql` builds the trusted prompt rows, and `int_claim_photo_ai.sql` loads each hash-verified image BLOB and invokes multimodal `ai_prompt`. The raw response then remains in the existing trusted-identity, validation, aggregation, and decision SQL chain.
 
 ```text
 claims-disposition/
@@ -128,10 +128,7 @@ claims-disposition/
 │   │       DocumentOcrActor, instantiated on the Local driver or attached on Ray.
 │   │
 │   ├── photo_ai.py
-│   │   # Re-reads and hashes photos, builds damage prompts, and binds every request
-│   │   # and response to the same claim, file, and SHA-256.
-│   │   └── [Vane] Local uses vane.ai.load_provider and reuses one async prompter
-│   │       on the driver; Ray uses vane.ai.prompt and Runner materialization.
+│   │   # Defines the immutable damage-response schema/system message and Qwen preflight.
 │   │
 │   ├── sql/
 │   │   ├── staging/
@@ -141,7 +138,7 @@ claims-disposition/
 │   │   │   │   # Expands materials_json per file and validates roles, media types,
 │   │   │   │   # duplicate identities, and canonical MinIO locators.
 │   │   │   └── stg_run_config.sql
-│   │   │       # Exposes credential-free OCR, model, and run settings to SQL.
+│   │   │       # Exposes credential-free OCR, object-store, and run settings to SQL.
 │   │   │
 │   │   ├── intermediate/
 │   │   │   ├── int_claim_material_inputs.sql
@@ -163,9 +160,13 @@ claims-disposition/
 │   │   │   ├── int_claim_document_quality_udf.sql
 │   │   │   │   # Direct Runner SQL evaluates the bound document contract and emits a usability result.
 │   │   │   ├── int_claim_material_facts.sql
-│   │   │   │   # Joins all UDF outputs, aggregates one row per claim, and builds ordered verified photo inputs for AI.
+│   │   │   │   # Joins all UDF outputs and aggregates one material-quality row per claim.
+│   │   │   ├── int_claim_photo_ai_inputs.sql
+│   │   │   │   # Selects quality-qualified photos and builds delimited, untrusted-evidence prompts in SQL.
+│   │   │   ├── int_claim_photo_ai.sql
+│   │   │   │   # Rechecks each MinIO object hash, loads its image BLOB, and calls multimodal ai_prompt in Runner SQL.
 │   │   │   ├── int_claim_damage_validation_inputs.sql
-│   │   │   │   # Expands verified photo inputs and binds each Vane AI response to trusted claim, file, and SHA-256 identities.
+│   │   │   │   # Binds each AI response to trusted claim, file, quality, and SHA-256 identities.
 │   │   │   ├── int_claim_damage_validation_udf.sql
 │   │   │   │   # Direct Runner SQL normalizes and strictly validates each untrusted damage-model response.
 │   │   │   ├── int_claim_damage_facts.sql
@@ -190,7 +191,7 @@ claims-disposition/
     # Covers configuration, Runner orchestration, SQL paths, publication, and packaging.
 ```
 
-The execution path is `run_demo.py → cli.py → pipeline.py → Vane Function/Actor/AI → SQL Relations → output_writer.py → verify_outputs.py`. The driver reads PostgreSQL/MinIO, owns the pure-SQL DuckDB catalog, and publishes the output. For every `*_udf.sql` projection, `pipeline.py` stages driver inputs as temporary Parquet, executes the projection through the selected Vane Runner, and registers the materialized result back in the driver catalog. Local builds the OCR lookup and AI response table with one driver-owned OCR implementation and one reused Vane provider prompter; Ray attaches the OCR Actor and executes AI through `vane.ai.prompt`. Both paths preserve the same SQL nodes and typed contracts.
+The execution path is `run_demo.py → cli.py → pipeline.py → Vane Function/Actor/SQL ai_prompt → SQL Relations → output_writer.py → verify_outputs.py`. The driver reads PostgreSQL/MinIO, owns the pure-SQL DuckDB catalog, and publishes the output. `pipeline.py` stages driver inputs as temporary Parquet, executes direct UDF and AI SQL projections through the selected Vane Runner, and registers each materialized result back in the driver catalog. Local uses a driver-owned immutable OCR lookup while Ray attaches the OCR Actor; both execute the same image-BLOB `ai_prompt` SQL and preserve the same typed contracts.
 
 ## Decision boundary
 

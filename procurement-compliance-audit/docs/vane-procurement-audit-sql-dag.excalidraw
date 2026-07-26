@@ -57,7 +57,7 @@
     },
     {
       "type": "text", "id": "proc_legend_ai_text", "x": 838, "y": 151, "width": 300, "height": 25,
-      "text": "Python / Vane AI relation", "originalText": "Python / Vane AI relation", "fontSize": 16, "fontFamily": 3, "textAlign": "left", "verticalAlign": "middle", "strokeColor": "#374151",
+      "text": "SQL / Vane AI relation", "originalText": "SQL / Vane AI relation", "fontSize": 16, "fontFamily": 3, "textAlign": "left", "verticalAlign": "middle", "strokeColor": "#374151",
       "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid", "roughness": 0, "opacity": 100, "angle": 0,
       "seed": 721010, "version": 1, "versionNonce": 722010, "isDeleted": false, "groupIds": [], "boundElements": null, "link": null, "locked": false, "containerId": null, "lineHeight": 1.25
     },
@@ -324,7 +324,7 @@
     },
     {
       "type": "text", "id": "proc_text_evidence_ai", "x": 1370, "y": 353, "width": 260, "height": 42,
-      "text": "int_evidence_ai\n(ai.py / Vane AI)", "originalText": "int_evidence_ai\n(ai.py / Vane AI)", "fontSize": 14, "fontFamily": 3, "textAlign": "center", "verticalAlign": "middle", "strokeColor": "#374151",
+      "text": "int_evidence_ai\n(SQL ai_prompt + retry)", "originalText": "int_evidence_ai\n(SQL ai_prompt + retry)", "fontSize": 14, "fontFamily": 3, "textAlign": "center", "verticalAlign": "middle", "strokeColor": "#374151",
       "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid", "roughness": 0, "opacity": 100, "angle": 0,
       "seed": 725018, "version": 1, "versionNonce": 726018, "isDeleted": false, "groupIds": [], "boundElements": null, "link": null, "locked": false, "containerId": null, "lineHeight": 1.25
     },

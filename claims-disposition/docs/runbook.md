@@ -15,7 +15,7 @@ This runbook contains the exact environment, installation, service, configuratio
 | MinIO | `127.0.0.1:9000` |
 | Model service | Qwen2.5-VL-3B on an NVIDIA CUDA GPU at `127.0.0.1:8001` |
 
-The verified Vane release is published on public PyPI with x86_64 Linux wheels for CPython 3.10, 3.11, and 3.12, all tagged `manylinux_2_28` (glibc 2.28 or newer). This demo was installed and validated with CPython 3.12 in the environment shown above; source builds and other CPU architectures were not validated.
+This SQL-AI branch requires the image-capable Vane build that exposes `ai_prompt(VARCHAR, BLOB, STRUCT)`. Its package metadata remains `vane-ai==0.1.0a1`, so the launcher also pins the DuckDB engine/source identifiers and runs a SQL capability probe. A wheel with the same package version but without that overload is rejected.
 
 Install the project-side Ubuntu tools:
 
@@ -47,7 +47,7 @@ The environment directory may have another name. The launcher validates the acti
 python -m pip install vane-ai
 ```
 
-No alternate package index is required. The command installs Vane from public PyPI; this demo's `pyproject.toml` pins the validated `vane-ai==0.1.0a1` runtime, and the launcher rejects unvalidated Vane or custom DuckDB builds.
+Use this command only when the published wheel contains the image-capable build. During local Vane development, activate the prebuilt Vane worktree environment instead, then install the demo dependencies into that active environment. The launcher rejects a same-version build whose engine identifiers or SQL image overload do not match.
 
 ### 3. Install the demo
 
@@ -165,13 +165,13 @@ There is no AI mock fallback. An unavailable service, unreadable image, invalid 
 | OCR | RapidOCR on CPU; required fields `claim_number`, `claimant_name`, `loss_date`; minimum mean confidence `0.70` |
 | AI | OpenAI provider; `http://127.0.0.1:8001/v1`; model `Qwen2.5-VL-3B-Instruct`; concurrency `1`; timeout `120` seconds |
 
-The checked-in configuration uses `runner: local`; `runner: ray` selects the distributed path. Both modes were verified end to end with public `vane-ai==0.1.0a1`, real RapidOCR, and the local Qwen service.
+The checked-in configuration uses `runner: local`; `runner: ray` selects the distributed path. The image-capable local Vane build uses the same SQL relation contracts in both modes.
 
-On Local, the pipeline creates one `DocumentOcrActor` implementation on the driver, runs it once for every eligible supporting-document locator, and attaches the immutable results as `document_ocr_json(bucket, object_key)`. It also instantiates the configured model through Vane's public provider API and reuses one async client on the driver. This keeps the native ONNX sessions and async provider client outside LocalRunner subprocess boundaries.
+On Local, the pipeline creates one `DocumentOcrActor` implementation on the driver, runs it once for every eligible supporting-document locator, and attaches the immutable results as `document_ocr_json(bucket, object_key)`.
 
-On Ray, `DocumentOcrActor` is attached as the stateful `document_ocr_json(bucket, object_key)` expression and Qwen runs through `vane.ai.prompt`. The OCR engine initializes lazily inside the isolated Actor worker. The launcher sets `VANE_UDF_UNREGISTER_TIMEOUT_MS=60000` unless the operator supplied another value, giving native Ray OCR workers enough time to shut down cleanly.
+On Ray, `DocumentOcrActor` is attached as the stateful `document_ocr_json(bucket, object_key)` expression. The OCR engine initializes lazily inside the isolated Actor worker. The launcher sets `VANE_UDF_UNREGISTER_TIMEOUT_MS=60000` unless the operator supplied another value, giving native Ray OCR workers enough time to shut down cleanly.
 
-In both modes, `int_claim_document_ocr_udf.sql` calls the same expression once per eligible document, every `*_udf.sql` file remains a direct Runner projection, and the following pure SQL file parses, joins, classifies, or aggregates the same materialized contract. Driver-local inputs are staged as temporary Parquet files and results are registered back in the driver's DuckDB catalog. Switching Runner changes execution placement, not SQL or output contracts.
+In both modes, `int_claim_document_ocr_udf.sql` calls the same OCR expression once per eligible document. `int_claim_photo_ai_inputs.sql` builds one prompt row per quality-qualified photo; `int_claim_photo_ai.sql` rechecks its MinIO SHA-256, loads the BLOB, and calls multimodal `ai_prompt`. Every direct Runner projection is materialized back into the driver's DuckDB catalog, and the existing response-validation and business-rule SQL remains unchanged.
 
 The loader validates YAML shape, SQL identifiers, loopback URLs, required values, and numeric ranges. Diagnostics avoid printing the complete PostgreSQL DSN, MinIO secret, or AI key. For a loopback AI URL, the launcher removes HTTP proxy variables and augments `NO_PROXY`/`no_proxy`.
 
@@ -236,11 +236,11 @@ The writer validates all nine columns, types, enums, confidence, and timestamps 
 | Vane distribution metadata (`vane-ai`) | `0.1.0a1` |
 | `vane.__version__` | `0.1.0a1` |
 | DuckDB Python package | `0.1.0a1` |
-| DuckDB engine | `v1.6.0-dev1` |
-| DuckDB source revision | `398033a962` |
+| DuckDB engine | `v1.6.0-dev2` |
+| DuckDB source revision | `b1e6e66d56` |
 | OpenAI Python client | `2.45.0` |
 
-The launcher also requires `vane.func`, `vane.cls`, `vane.attach_function`, `vane.configure`, `vane.ai.load_provider`, `vane.ai.prompt`, and `duckdb.ray_cxx`. Any mismatch fails explicitly instead of silently falling back to ordinary DuckDB.
+The launcher also requires `vane.func`, `vane.cls`, `vane.attach_function`, `vane.configure`, and `duckdb.ray_cxx`, then executes `select ai_prompt(NULL, NULL::BLOB, NULL)` to prove the image overload is present. Any mismatch fails explicitly instead of silently falling back to ordinary DuckDB.
 
 ## Data, credentials, and privacy
 

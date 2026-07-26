@@ -15,7 +15,7 @@ This runbook contains the exact environment, installation, model-service, config
 | MinIO | `127.0.0.1:9000`, HTTP |
 | Model service | `Qwen2.5-VL-3B-Instruct` on a local NVIDIA GPU |
 
-The verified Vane release is published on public PyPI with x86_64 Linux wheels for CPython 3.10, 3.11, and 3.12, all tagged `manylinux_2_28` (glibc 2.28 or newer). This demo was installed and validated with CPython 3.12 in the environment shown above; source builds and other CPU architectures were not validated.
+This SQL-AI branch requires the image-capable Vane build that exposes `ai_prompt(VARCHAR, BLOB, STRUCT)`. Its package metadata remains `vane-ai==0.1.0a1`, so the launcher also pins the DuckDB engine/source identifiers and runs a SQL capability probe. A wheel with the same package version but without that overload is rejected.
 
 Install the project-side Ubuntu tools:
 
@@ -43,7 +43,7 @@ python -m pip install --upgrade pip
 python -m pip install vane-ai
 ```
 
-No alternate package index is required. The command installs Vane from public PyPI; this demo's `pyproject.toml` pins the validated `vane-ai==0.1.0a1` runtime, and the launcher rejects other runtime identifiers.
+Use this command only when the published wheel contains the image-capable build. During local Vane development, activate the prebuilt Vane worktree environment instead, then install the demo dependencies into that active environment. The launcher rejects a same-version build whose engine identifiers or SQL image overload do not match.
 
 ### 3. Install the demo
 
@@ -176,7 +176,7 @@ At runtime, the authoritative sources are the PostgreSQL `projects`, `suppliers`
 | `audit_findings` | table | finding | Three deterministic rules |
 | `audit_summary` | table | project | Project-level audit status |
 
-`int_evidence_ai` is the only core intermediate relation assembled by Python business logic. The transient `*_udf` relations are defined in SQL and materialized by the active Runner. Each image request is bound to `project_id/file_id`, independently of actor execution order. The returned `document_type` must match the fixture's trusted role; a mismatch triggers one contract-reinforced retry with the same image, and SQL applies the role binding again.
+`int_evidence_ai_inputs.sql` builds one trusted, role-specific prompt row per usable OCR result, applies the OCR confidence threshold, and fails unless every trusted evidence image is covered. `int_evidence_ai_attempt_1.sql` loads the corresponding MinIO image BLOB and invokes multimodal `ai_prompt`. A direct try-validator selects JSON/role-contract failures for `int_evidence_ai_attempt_2.sql`; `int_evidence_ai.sql` then keeps the valid first response or the single retry response. Each response remains bound to `project_id/file_id`, and the final strict validator rejects malformed JSON or a document type that disagrees with the trusted role.
 
 Use `queries.sql` to inspect all eight relations in the same connection:
 
@@ -190,9 +190,9 @@ select * from audit_summary;
 
 Qwen returns only document type, expert ID, supplier, recommendation, participation, recusal, source evidence text, and confidence. It does not decide whether a violation occurred.
 
-The local service may wrap JSON in one complete code fence. The validator normalizes only that outer fence and rejects surrounding prose, missing or unknown fields, invalid types, and placeholder evidence. The response is prevalidated at the AI boundary and independently validated again by the attached stateless UDF in SQL.
+The local service may wrap JSON in one complete code fence. The attached stateless UDF normalizes only that outer fence and rejects surrounding prose, missing or unknown fields, invalid types, and placeholder evidence.
 
-Both images must pass OCR and reach Qwen. Missing OCR coverage fails the run without publishing output. When both calls complete but either AI confidence is below `0.75`, SQL emits no findings and marks the summary `insufficient_evidence`.
+Both trusted images must have successful, non-empty OCR above the configured threshold. Incomplete OCR coverage fails before Qwen and publishes nothing. A first JSON/role-contract failure is retried once with the same image and a reinforced prompt; an invalid retry fails strict validation. When both responses are valid but either AI confidence is below `0.75`, SQL emits no findings and marks the summary `insufficient_evidence`.
 
 The deterministic findings are:
 
@@ -225,13 +225,13 @@ The checked-in configuration uses:
 runner: local
 ```
 
-The checked-in value is `runner: local`; change it to `runner: ray` for the distributed path. Both modes were verified end to end with public `vane-ai==0.1.0a1`, real RapidOCR, and the local Qwen service.
+The checked-in value is `runner: local`; change it to `runner: ray` for the distributed path. The image-capable local Vane build uses the same SQL relation contracts in both modes.
 
-On Local, the pipeline creates one `EvidenceOcrActor` implementation on the driver, processes every trusted evidence locator once, and attaches the immutable results as `evidence_ocr_json(bucket, object_key)`. It also instantiates the configured model through Vane's public provider API and reuses one async client on the driver. This keeps native ONNX sessions and the async provider client outside LocalRunner subprocess boundaries.
+On Local, the pipeline creates one `EvidenceOcrActor` implementation on the driver, processes every trusted evidence locator once, and attaches the immutable results as `evidence_ocr_json(bucket, object_key)`.
 
-On Ray, `EvidenceOcrActor` is attached as the stateful `evidence_ocr_json(bucket, object_key)` expression and Qwen runs through `vane.ai.prompt`. The OCR engine initializes lazily inside its isolated Actor worker. The launcher sets `VANE_UDF_UNREGISTER_TIMEOUT_MS=60000` unless the operator supplied another value, giving native Ray OCR workers enough time to shut down cleanly.
+On Ray, `EvidenceOcrActor` is attached as the stateful `evidence_ocr_json(bucket, object_key)` expression. The OCR engine initializes lazily inside its isolated Actor worker. The launcher sets `VANE_UDF_UNREGISTER_TIMEOUT_MS=60000` unless the operator supplied another value, giving native Ray OCR workers enough time to shut down cleanly.
 
-In both modes, `int_evidence_ocr_udf.sql` calls the same expression once per image and `int_evidence_ocr.sql` parses the same materialized JSON. Response validation keeps the `int_conflict_validation_udf.sql` then `int_conflict_facts.sql` shape. Driver-local inputs are staged as temporary Parquet files and Runner results are registered in the driver's DuckDB catalog for the next pure SQL node. Switching Runner changes execution placement, not SQL or output contracts. A real multi-node target cluster still requires its own infrastructure smoke test.
+In both modes, `int_evidence_ocr_udf.sql` calls the same expression once per image and `int_evidence_ocr.sql` parses the same materialized JSON. `int_evidence_ai_inputs.sql` constructs prompts and enforces complete OCR coverage; the first attempt loads each image BLOB, and the SQL-selected retry reuses those exact staged bytes for its second `ai_prompt` call. Final response validation keeps the `int_conflict_validation_udf.sql` then `int_conflict_facts.sql` shape. Driver-local inputs are staged as temporary Parquet files and Runner results are registered in the driver's DuckDB catalog for the next pure SQL node.
 
 ## Troubleshooting
 
@@ -253,11 +253,11 @@ In both modes, `int_evidence_ocr_udf.sql` calls the same expression once per ima
 | Vane distribution metadata (`vane-ai`) | `0.1.0a1` |
 | `vane.__version__` | `0.1.0a1` |
 | DuckDB Python package | `0.1.0a1` |
-| DuckDB engine | `v1.6.0-dev1` |
-| DuckDB source revision | `398033a962` |
+| DuckDB engine | `v1.6.0-dev2` |
+| DuckDB source revision | `b1e6e66d56` |
 | OpenAI Python client | `2.45.0` |
 
-The required API surface includes `vane.func`, `vane.cls`, `vane.attach_function`, `vane.configure`, `vane.ai.load_provider`, `vane.ai.prompt`, and `duckdb.ray_cxx`. Any identity or API mismatch fails startup instead of silently falling back to ordinary DuckDB. Runtime upgrades must update the launcher and real end-to-end validation together.
+The required API surface includes `vane.func`, `vane.cls`, `vane.attach_function`, `vane.configure`, and `duckdb.ray_cxx`. The launcher then executes `select ai_prompt(NULL, NULL::BLOB, NULL)` to prove the image overload is present. Any identity or capability mismatch fails startup instead of silently falling back to ordinary DuckDB.
 
 ## Data, credentials, and privacy
 

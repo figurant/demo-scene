@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the demo with the validated public-PyPI Vane package."""
+"""Run the demo with the validated image-capable Vane build."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ VANE_DISTRIBUTION_NAME = "vane-ai"
 EXPECTED_VANE_DISTRIBUTION_VERSION = "0.1.0a1"
 EXPECTED_VANE_API_VERSION = "0.1.0a1"
 EXPECTED_DUCKDB_PYTHON_VERSION = "0.1.0a1"
-EXPECTED_DUCKDB_ENGINE_VERSION = "v1.6.0-dev1"
-EXPECTED_DUCKDB_SOURCE_REVISION = "398033a962"
+EXPECTED_DUCKDB_ENGINE_VERSION = "v1.6.0-dev2"
+EXPECTED_DUCKDB_SOURCE_REVISION = "b1e6e66d56"
 DEFAULT_VANE_UDF_UNREGISTER_TIMEOUT_MS = "60000"
 INSTALL_HINT = "python -m pip install vane-ai"
 
@@ -91,14 +91,29 @@ def validate_runtime_api(vane_module: object, duckdb_module: object) -> None:
             "real Vane runtime is missing callable API: "
             + ", ".join(f"vane.{name}" for name in missing)
         )
-    ai_module = getattr(vane_module, "ai", None)
-    for name in ("prompt", "load_provider"):
-        if not callable(getattr(ai_module, name, None)):
-            raise _runtime_error(
-                f"real Vane runtime is missing callable vane.ai.{name}"
-            )
     if not hasattr(duckdb_module, "ray_cxx"):
         raise _runtime_error("real Vane runtime DuckDB is missing duckdb.ray_cxx")
+
+
+def validate_ai_prompt_image_sql(duckdb_module: object) -> None:
+    """Require the SQL overload that accepts one image BLOB."""
+
+    try:
+        connection = duckdb_module.connect()
+        try:
+            rows = connection.execute(
+                "select ai_prompt(NULL, NULL::BLOB, NULL)"
+            ).fetchall()
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise _runtime_error(
+            f"Vane SQL ai_prompt image capability is unavailable: {exc}"
+        ) from exc
+    if rows != [(None,)]:
+        raise _runtime_error(
+            "Vane SQL ai_prompt image capability returned an unexpected result"
+        )
 
 
 def require_package_from_current_environment(
@@ -148,6 +163,7 @@ def require_real_vane_runtime() -> None:
         raise _runtime_error(f"cannot identify the validated Vane runtime: {exc}") from exc
 
     validate_runtime_api(vane, duckdb)
+    validate_ai_prompt_image_sql(duckdb)
     require_package_from_current_environment("vane", getattr(vane, "__file__", None))
     require_package_from_current_environment(
         "duckdb",

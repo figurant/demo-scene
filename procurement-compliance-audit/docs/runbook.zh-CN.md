@@ -15,7 +15,7 @@
 | MinIO | `127.0.0.1:9000`，HTTP |
 | 模型服务 | 本机 NVIDIA GPU 上的 `Qwen2.5-VL-3B-Instruct` |
 
-已验证的 Vane 正式发布包位于公共 PyPI，提供面向 CPython 3.10、3.11 和 3.12 的 x86_64 Linux wheel，平台标签均为 `manylinux_2_28`（glibc 2.28 或更新）。本 Demo 仍使用上表中的 CPython 3.12 完成安装与验证；源码构建和其他 CPU 架构未验证。
+这个 SQL AI 分支要求 Vane 提供 `ai_prompt(VARCHAR, BLOB, STRUCT)` 图片重载。其包元数据仍是 `vane-ai==0.1.0a1`，因此 Launcher 还会固定 DuckDB engine/source 标识，并执行 SQL 能力探针；同版本但缺少该重载的 wheel 会被拒绝。
 
 安装项目侧 Ubuntu 工具：
 
@@ -43,7 +43,7 @@ python -m pip install --upgrade pip
 python -m pip install vane-ai
 ```
 
-不再需要备用 package index。上述命令直接从公共 PyPI 安装 Vane；本 Demo 的 `pyproject.toml` 固定已验证的 `vane-ai==0.1.0a1`，Launcher 会拒绝其他 Runtime 标识。
+只有已发布 wheel 包含图片能力时才使用上述命令。本地开发 Vane 时，应先激活已构建好的 Vane worktree 环境，再把 Demo 依赖安装到该环境。Launcher 会拒绝 engine 标识或 SQL 图片重载不匹配的同版本构建。
 
 ### 3. 安装 Demo
 
@@ -176,7 +176,7 @@ python -m pytest tests/fast -q
 | `audit_findings` | table | finding | 三条确定性规则 |
 | `audit_summary` | table | project | 项目级审计状态 |
 
-`int_evidence_ai` 是唯一由 Python 业务逻辑组装的核心中间 Relation；临时 `*_udf` Relation 均由 SQL 定义并通过当前 Runner 物化。每张图片请求直接绑定 `project_id/file_id`，不依赖 Actor 执行顺序。返回的 `document_type` 必须与 Fixture 中可信的 role 一致；不一致时会使用同一张图片强化合同后重试一次，SQL 还会再次应用 role 绑定。
+`int_evidence_ai_inputs.sql` 为每个可用 OCR 结果生成一行可信、按角色区分的 Prompt，应用 OCR 置信度门槛，并要求完整覆盖所有可信证据图片；`int_evidence_ai_attempt_1.sql` 加载对应 MinIO 图片 BLOB 并调用多模态 `ai_prompt`。直接 try-validator 会把 JSON/角色合同失败行选入 `int_evidence_ai_attempt_2.sql`；`int_evidence_ai.sql` 再保留合规首轮响应或唯一一次重试响应。每个响应仍绑定 `project_id/file_id`，最终严格校验器会拒绝不合规 JSON 或与可信 role 不一致的文档类型。
 
 使用 `queries.sql` 在同一个 Connection 中检查八个 Relation：
 
@@ -190,9 +190,9 @@ select * from audit_summary;
 
 Qwen 只返回文档类型、专家编号、供应商、推荐、参评、回避、证据原文和置信度，不判断是否违规。
 
-本地服务可能在 JSON 外包一层完整 code fence。校验器只规范化这层完整外壳，并拒绝额外 prose、缺失或未知字段、错误类型和占位证据。响应先在 AI 边界预检，再由 SQL 中挂载的无状态 UDF 独立校验。
+本地服务可能在 JSON 外包一层完整 code fence。SQL 中挂载的无状态 UDF 只规范化这层完整外壳，并拒绝额外 prose、缺失或未知字段、错误类型和占位证据。
 
-两张图片都必须通过 OCR 并真实调用 Qwen。缺少任一图片的 OCR 覆盖时运行失败且不发布输出。两次调用都完成但任一 AI confidence 低于 `0.75` 时，SQL 不生成 finding，并将 summary 标记为 `insufficient_evidence`。
+两张可信图片都必须 OCR 成功、文本非空且达到配置门槛；OCR 覆盖不完整会在 Qwen 调用前失败，并且不发布结果。首轮 JSON/角色合同失败时，会针对同一图片使用加强 Prompt 重试一次；重试后仍不合规则由严格校验终止。两份响应均合规但任一 AI confidence 低于 `0.75` 时，SQL 不生成 finding，并将 summary 标记为 `insufficient_evidence`。
 
 三条确定性 finding 是：
 
@@ -225,13 +225,13 @@ Qwen 只返回文档类型、专家编号、供应商、推荐、参评、回避
 runner: local
 ```
 
-仓库实际默认值是 `runner: local`；改成 `runner: ray` 即可选择分布式路径。两种模式均已使用公共 `vane-ai==0.1.0a1`、真实 RapidOCR 和本地 Qwen 服务完成端到端验证。
+仓库实际默认值是 `runner: local`；改成 `runner: ray` 即可选择分布式路径。带图片能力的本地 Vane 构建在两种模式下使用相同的 SQL Relation 合同。
 
-Local 模式下，Pipeline 在 Driver 上创建一份 `EvidenceOcrActor` 实现，对每个可信证据 locator 执行一次，再将不可变结果挂载为 `evidence_ocr_json(bucket, object_key)`。模型通过 Vane 公共 provider API 实例化，并在 Driver 上复用一个异步 client。这样原生 ONNX session 与异步 provider client 不会跨越 LocalRunner 的 subprocess 边界。
+Local 模式下，Pipeline 在 Driver 上创建一份 `EvidenceOcrActor` 实现，对每个可信证据 locator 执行一次，再将不可变结果挂载为 `evidence_ocr_json(bucket, object_key)`。
 
-Ray 模式下，`EvidenceOcrActor` 挂载为有状态 `evidence_ocr_json(bucket, object_key)` 表达式，Qwen 通过 `vane.ai.prompt` 执行。OCR 引擎在隔离的 Actor worker 内延迟初始化。Launcher 还会在操作者没有显式设置时使用 `VANE_UDF_UNREGISTER_TIMEOUT_MS=60000`，为 Ray 原生 OCR worker 留出足够的清理时间。
+Ray 模式下，`EvidenceOcrActor` 挂载为有状态 `evidence_ocr_json(bucket, object_key)` 表达式，OCR 引擎在隔离的 Actor worker 内延迟初始化。Launcher 还会在操作者没有显式设置时使用 `VANE_UDF_UNREGISTER_TIMEOUT_MS=60000`，为 Ray 原生 OCR worker 留出足够的清理时间。
 
-两种模式下，`int_evidence_ocr_udf.sql` 都对每张图片调用相同表达式，`int_evidence_ocr.sql` 也解析相同的物化 JSON。响应校验仍采用 `int_conflict_validation_udf.sql → int_conflict_facts.sql` 分层。Driver 输入临时落为 Parquet，Runner 结果注册回 Driver 的 DuckDB catalog 供下一段纯 SQL 使用。切换 Runner 只改变执行位置，不改变 SQL 与输出合同。真实多节点目标集群仍需单独做基础设施 smoke test。
+两种模式下，`int_evidence_ocr_udf.sql` 都对每张图片调用相同表达式，`int_evidence_ocr.sql` 也解析相同的物化 JSON；`int_evidence_ai_inputs.sql` 构造 Prompt 并强制 OCR 完整覆盖，首轮加载每张图片 BLOB，SQL 选出的重试则复用这些完全相同的暂存字节进行第二次 `ai_prompt` 调用。最终响应校验仍采用 `int_conflict_validation_udf.sql → int_conflict_facts.sql` 分层。Driver 输入临时落为 Parquet，Runner 结果注册回 Driver 的 DuckDB catalog 供下一段纯 SQL 使用。
 
 ## 排错
 
@@ -253,11 +253,11 @@ Ray 模式下，`EvidenceOcrActor` 挂载为有状态 `evidence_ocr_json(bucket,
 | Vane distribution metadata（`vane-ai`） | `0.1.0a1` |
 | `vane.__version__` | `0.1.0a1` |
 | DuckDB Python package | `0.1.0a1` |
-| DuckDB engine | `v1.6.0-dev1` |
-| DuckDB source revision | `398033a962` |
+| DuckDB engine | `v1.6.0-dev2` |
+| DuckDB source revision | `b1e6e66d56` |
 | OpenAI Python client | `2.45.0` |
 
-必需 API 包括 `vane.func`、`vane.cls`、`vane.attach_function`、`vane.configure`、`vane.ai.load_provider`、`vane.ai.prompt` 和 `duckdb.ray_cxx`。任一标识或 API 不匹配都会启动失败，不会静默回退到普通 DuckDB。升级 Runtime 时必须同步更新 Launcher 和真实端到端验收。
+必需 API 包括 `vane.func`、`vane.cls`、`vane.attach_function`、`vane.configure` 和 `duckdb.ray_cxx`。Launcher 随后执行 `select ai_prompt(NULL, NULL::BLOB, NULL)` 验证图片重载存在。任一标识或能力不匹配都会启动失败，不会静默回退到普通 DuckDB。
 
 ## 数据、凭据和隐私
 

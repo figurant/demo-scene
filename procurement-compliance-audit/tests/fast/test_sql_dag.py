@@ -6,11 +6,12 @@ import re
 
 import duckdb
 import pyarrow as pa
+import pytest
 
 from procurement_audit_sql_demo.fixture_loader import build_fixture
 from procurement_audit_sql_demo.vane_functions import (
     stable_json,
-    validate_audit_fact_json,
+    validate_audit_fact_for_role_json,
 )
 
 
@@ -29,6 +30,11 @@ CORE_RELATIONS = {
 }
 INTERNAL_RELATIONS = {
     "int_evidence_ocr_udf",
+    "int_evidence_ai_inputs",
+    "int_evidence_ai_attempt_1",
+    "int_evidence_ai_attempt_1_validation_udf",
+    "int_evidence_ai_retry_inputs",
+    "int_evidence_ai_attempt_2",
     "int_conflict_validation_inputs",
     "int_conflict_validation_udf",
 }
@@ -37,6 +43,12 @@ SQL_ORDER = (
     "staging/stg_evidence_images.sql",
     "intermediate/int_evidence_ocr_udf.sql",
     "intermediate/int_evidence_ocr.sql",
+    "intermediate/int_evidence_ai_inputs.sql",
+    "intermediate/int_evidence_ai_attempt_1.sql",
+    "intermediate/int_evidence_ai_attempt_1_validation_udf.sql",
+    "intermediate/int_evidence_ai_retry_inputs.sql",
+    "intermediate/int_evidence_ai_attempt_2.sql",
+    "intermediate/int_evidence_ai.sql",
     "intermediate/int_conflict_validation_inputs.sql",
     "intermediate/int_conflict_validation_udf.sql",
     "intermediate/int_conflict_facts.sql",
@@ -132,26 +144,30 @@ def _run_dag(
         "VARCHAR",
     )
     connection.create_function(
-        "validate_audit_fact_json",
-        validate_audit_fact_json,
-        ["VARCHAR"],
+        "validate_audit_fact_for_role_json",
+        validate_audit_fact_for_role_json,
+        ["VARCHAR", "VARCHAR"],
         "VARCHAR",
     )
     for relative_path in SQL_ORDER[:4]:
-        connection.execute((SQL_ROOT / relative_path).read_text(encoding="utf-8"))
+        connection.execute(
+            (SQL_ROOT / relative_path).read_text(encoding="utf-8")
+        )
+    ai_inputs = (SQL_ROOT / SQL_ORDER[4]).read_text(encoding="utf-8")
+    connection.execute(ai_inputs.replace("__OCR_MIN_CONFIDENCE_SQL__", "0.6"))
     _register_table(
         connection,
         "int_evidence_ai",
         _raw_ai_rows(confidence, swap_document_roles=swap_document_roles),
     )
-    for relative_path in SQL_ORDER[4:]:
+    for relative_path in SQL_ORDER[10:]:
         connection.execute((SQL_ROOT / relative_path).read_text(encoding="utf-8"))
     return connection
 
 
 def test_sql_dag_has_exactly_eight_core_relations():
     relation_pattern = re.compile(
-        r"create\s+or\s+replace\s+(?:table|view)\s+([a-z_]+)",
+        r"create\s+or\s+replace\s+(?:table|view)\s+([a-z_][a-z0-9_]*)",
         re.IGNORECASE,
     )
     sql_files = sorted(SQL_ROOT.rglob("*.sql"))
@@ -161,8 +177,8 @@ def test_sql_dag_has_exactly_eight_core_relations():
         for match in relation_pattern.finditer(path.read_text(encoding="utf-8"))
     }
 
-    assert len(sql_files) == 10
-    assert discovered == (CORE_RELATIONS - {"int_evidence_ai"}) | INTERNAL_RELATIONS
+    assert len(sql_files) == 16
+    assert discovered == CORE_RELATIONS | INTERNAL_RELATIONS
 
 
 def test_evidence_ocr_udf_stage_is_a_direct_runner_projection():
@@ -179,6 +195,42 @@ def test_evidence_ocr_udf_stage_is_a_direct_runner_projection():
     assert "evidence_ocr_json(" not in normalized_statement
 
 
+def test_evidence_ai_is_a_multimodal_sql_stage():
+    input_statement = (
+        SQL_ROOT / "intermediate/int_evidence_ai_inputs.sql"
+    ).read_text(encoding="utf-8")
+    first_attempt = (
+        SQL_ROOT / "intermediate/int_evidence_ai_attempt_1.sql"
+    ).read_text(encoding="utf-8")
+    first_validation = (
+        SQL_ROOT / "intermediate/int_evidence_ai_attempt_1_validation_udf.sql"
+    ).read_text(encoding="utf-8")
+    retry_inputs = (
+        SQL_ROOT / "intermediate/int_evidence_ai_retry_inputs.sql"
+    ).read_text(encoding="utf-8")
+    second_attempt = (
+        SQL_ROOT / "intermediate/int_evidence_ai_attempt_2.sql"
+    ).read_text(encoding="utf-8")
+    final_statement = (
+        SQL_ROOT / "intermediate/int_evidence_ai.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "BEGIN_UNTRUSTED_SUPPLIER_CONTEXT" in input_statement
+    assert "BEGIN_UNTRUSTED_OCR_TEXT" in input_statement
+    assert "coverage must match every trusted evidence image" in input_statement
+    assert first_attempt.count("ai_prompt(") == 1
+    assert first_attempt.count("minio_object_bytes(") == 1
+    assert second_attempt.count("ai_prompt(") == 1
+    assert second_attempt.count("minio_object_bytes(") == 0
+    assert "cast(image_bytes as blob)" in first_attempt
+    assert "cast(image_bytes as blob)" in second_attempt
+    assert "validation.image_bytes" in retry_inputs
+    assert "try_validate_audit_fact_for_role_json" in first_validation
+    assert "canonical_response = ''" in retry_inputs
+    assert "上一次输出未通过合同校验" in retry_inputs
+    assert "int_evidence_ai_attempt_2" in final_statement
+
+
 def test_conflict_fact_stage_owns_validation_and_role_filtering():
     input_statement = (
         SQL_ROOT / "intermediate/int_conflict_validation_inputs.sql"
@@ -191,7 +243,10 @@ def test_conflict_fact_stage_owns_validation_and_role_filtering():
     )
 
     assert "inner join stg_evidence_images" in input_statement
-    assert udf_statement.count("validate_audit_fact_json(raw_response)") == 1
+    assert (
+        udf_statement.count("validate_audit_fact_for_role_json(")
+        == 1
+    )
     assert "json_extract" not in udf_statement
     assert "from int_conflict_validation_udf" in fact_statement
     assert "role = 'expert_recommendation'" in fact_statement
@@ -252,16 +307,5 @@ def test_low_ai_confidence_yields_insufficient_evidence_not_false_pass():
 
 
 def test_swapped_valid_ai_documents_are_rejected_by_trusted_file_role():
-    connection = _run_dag(swap_document_roles=True)
-    try:
-        conflict_facts = _relation_rows(connection, "int_conflict_facts")
-        metrics = _relation_rows(connection, "int_score_metrics")
-        findings = _relation_rows(connection, "audit_findings")
-        summary = _relation_rows(connection, "audit_summary")
-    finally:
-        connection.close()
-
-    assert conflict_facts == []
-    assert metrics == []
-    assert findings == []
-    assert summary[0]["status"] == "insufficient_evidence"
+    with pytest.raises(Exception, match="does not match trusted"):
+        _run_dag(swap_document_roles=True)
