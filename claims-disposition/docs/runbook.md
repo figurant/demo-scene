@@ -157,7 +157,7 @@ There is no AI mock fallback. An unavailable service, unreadable image, invalid 
 
 | Setting | Default |
 | --- | --- |
-| Runner | `local` |
+| Runner | `ray` |
 | PostgreSQL DSN | `postgresql://vane_insight:***@127.0.0.1:5432/vane_insight` |
 | Raw relation | `claims_disposition_raw.claims` |
 | Output relation | `claims_disposition_output.claim_disposition` |
@@ -165,7 +165,7 @@ There is no AI mock fallback. An unavailable service, unreadable image, invalid 
 | OCR | RapidOCR on CPU; required fields `claim_number`, `claimant_name`, `loss_date`; minimum mean confidence `0.70` |
 | AI | OpenAI provider; `http://127.0.0.1:8001/v1`; model `Qwen2.5-VL-3B-Instruct`; concurrency `1`; timeout `120` seconds |
 
-The checked-in configuration uses `runner: local`; `runner: ray` selects the distributed path. The image-capable local Vane build uses the same SQL relation contracts in both modes.
+The checked-in configuration uses `runner: ray`; set `runner: local` only when intentionally testing the Local backend. The image-capable local Vane build uses the same SQL relation contracts in both modes.
 
 On Local, the pipeline creates one `DocumentOcrActor` implementation on the driver, runs it once for every eligible supporting-document locator, and attaches the immutable results as `document_ocr_json(bucket, object_key)`.
 

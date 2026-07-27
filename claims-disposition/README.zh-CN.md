@@ -17,7 +17,7 @@
 
 ## 为什么使用 Vane
 
-Vane 是面向多模态数据的多模计算引擎，让结构化记录、文档、图片、SQL、无状态 Python UDF、有状态 Actor 和 AI 模型在同一条可组合、可追踪的 Relation Pipeline 中协同执行。Vane 还将 Pipeline 逻辑与执行后端解耦。仓库默认使用 `local` Runner，Local 与 Ray 共用相同 Relation 合同。Local 在 Driver 上创建一份 RapidOCR 引擎，对每个合格证明文档 locator 各执行一次，并把不可变结果暴露给 SQL；Ray 则在隔离的有状态 Actor worker 内初始化原生 ONNX 引擎。两种模式都由 Vane SQL 把已验证图片加载为 BLOB，并直接调用多模态 `ai_prompt`。
+Vane 是面向多模态数据的多模计算引擎，让结构化记录、文档、图片、SQL、无状态 Python UDF、有状态 Actor 和 AI 模型在同一条可组合、可追踪的 Relation Pipeline 中协同执行。Vane 还将 Pipeline 逻辑与执行后端解耦。仓库默认使用 `ray` Runner，Local 与 Ray 共用相同 Relation 合同。Local 在 Driver 上创建一份 RapidOCR 引擎，对每个合格证明文档 locator 各执行一次，并把不可变结果暴露给 SQL；Ray 则在隔离的有状态 Actor worker 内初始化原生 ONNX 引擎。两种模式都由 Vane SQL 把已验证图片加载为 BLOB，并直接调用多模态 `ai_prompt`。
 
 ## 架构
 
@@ -61,7 +61,7 @@ stg_claims / stg_claim_materials / stg_run_config
 python scripts/run_demo.py e2e
 ```
 
-`runtime.yml` 默认是 `runner: local`。如需验证分布式 Actor 和 AI Relation 路径，可改为 `runner: ray` 并连接 Ray 集群。两种模式使用相同 SQL 合同；目标 Ray 集群仍需单独做基础设施 smoke test。
+`runtime.yml` 默认是 `runner: ray`，直接走分布式 Actor 和 AI Relation 路径。只有在有意测试 Local 后端时才改为 `runner: local`。两种模式使用相同 SQL 合同；默认 Ray 路径仍要求目标环境具备足够的 CPU、heap 和 object store 容量。
 
 成功运行会输出：
 
@@ -90,7 +90,7 @@ claims-disposition/
 │   # 根据 pyproject.toml 安装当前源码及 Fast Test Extra。
 │
 ├── runtime.yml
-│   # 配置 Vane Runner（默认 Local）、PostgreSQL、MinIO、OCR 和 Qwen。
+│   # 配置 Vane Runner（默认 Ray）、PostgreSQL、MinIO、OCR 和 Qwen。
 │
 ├── scripts/
 │   └── run_demo.py

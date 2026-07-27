@@ -157,7 +157,7 @@ python -m pytest tests/fast -q
 
 | 配置项 | 默认值 |
 | --- | --- |
-| Runner | `local` |
+| Runner | `ray` |
 | PostgreSQL DSN | `postgresql://vane_insight:***@127.0.0.1:5432/vane_insight` |
 | 原始 Relation | `claims_disposition_raw.claims` |
 | 输出 Relation | `claims_disposition_output.claim_disposition` |
@@ -165,7 +165,7 @@ python -m pytest tests/fast -q
 | OCR | RapidOCR CPU；必需字段 `claim_number`、`claimant_name`、`loss_date`；最低平均置信度 `0.70` |
 | AI | OpenAI provider；`http://127.0.0.1:8001/v1`；模型 `Qwen2.5-VL-3B-Instruct`；并发 `1`；超时 `120` 秒 |
 
-仓库默认使用 `runner: local`，`runner: ray` 用于选择分布式路径；带图片能力的本地 Vane 构建在两种模式下使用相同的 SQL Relation 合同。
+仓库默认使用 `runner: ray`；只有在有意测试 Local 后端时才改为 `runner: local`。带图片能力的本地 Vane 构建在两种模式下使用相同的 SQL Relation 合同。
 
 Local 模式下，Pipeline 在 Driver 上创建一份 `DocumentOcrActor` 实现，对每个合格证明文档 locator 执行一次，再将不可变结果挂载为 `document_ocr_json(bucket, object_key)`。
 

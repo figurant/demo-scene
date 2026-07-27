@@ -17,7 +17,7 @@ The synthetic fixture covers four workflow outcomes:
 
 ## Why Vane
 
-Vane is a multi-compute engine for multimodal data: it lets structured records, documents, images, SQL, stateless Python UDFs, stateful actors, and AI models work together in one composable and traceable Relation pipeline. Vane also separates pipeline logic from execution backends. The checked-in configuration defaults to the `local` Runner, while Local and Ray share the same relation contracts. Local creates one RapidOCR engine on the driver, processes each eligible supporting-document locator once, and exposes the immutable results to SQL; Ray initializes the native ONNX engine inside an isolated stateful Actor worker. In both modes, Vane SQL loads each verified image as a BLOB and calls multimodal `ai_prompt` directly.
+Vane is a multi-compute engine for multimodal data: it lets structured records, documents, images, SQL, stateless Python UDFs, stateful actors, and AI models work together in one composable and traceable Relation pipeline. Vane also separates pipeline logic from execution backends. The checked-in configuration defaults to the `ray` Runner, while Local and Ray share the same relation contracts. Local creates one RapidOCR engine on the driver, processes each eligible supporting-document locator once, and exposes the immutable results to SQL; Ray initializes the native ONNX engine inside an isolated stateful Actor worker. In both modes, Vane SQL loads each verified image as a BLOB and calls multimodal `ai_prompt` directly.
 
 ## Architecture
 
@@ -61,7 +61,7 @@ This demo requires CPython 3.12 and an image-capable `vane-ai==0.1.0a1` build wh
 python scripts/run_demo.py e2e
 ```
 
-`runtime.yml` defaults to `runner: local`. Set it to `runner: ray` and connect a Ray cluster to exercise the distributed Actor and AI Relation path. Both modes use the same SQL contracts; a target Ray cluster still needs its own infrastructure smoke test.
+`runtime.yml` defaults to `runner: ray`, exercising the distributed Actor and AI Relation path. Set it to `runner: local` only when intentionally testing the Local backend. Both modes use the same SQL contracts; the default Ray path still needs enough CPU, heap, and object-store capacity in the target environment.
 
 A successful run prints:
 
@@ -90,7 +90,7 @@ claims-disposition/
 │   # Installs this source tree and its fast-test extra from pyproject.toml.
 │
 ├── runtime.yml
-│   # Configures the Vane Runner (Local by default), PostgreSQL, MinIO, OCR, and Qwen.
+│   # Configures the Vane Runner (Ray by default), PostgreSQL, MinIO, OCR, and Qwen.
 │
 ├── scripts/
 │   └── run_demo.py

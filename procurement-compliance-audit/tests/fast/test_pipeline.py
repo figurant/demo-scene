@@ -263,7 +263,7 @@ def test_pipeline_runs_eight_relations_and_publishes(tmp_path, monkeypatch):
     )
 
     assert events == [
-        "configure:local",
+        "configure:ray",
         "attach_functions",
         "health",
         "ai:2",

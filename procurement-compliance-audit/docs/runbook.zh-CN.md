@@ -212,7 +212,7 @@ Qwen 只返回文档类型、专家编号、供应商、推荐、参评、回避
 
 | 配置项 | 默认值 |
 | --- | --- |
-| Runner | `local` |
+| Runner | `ray` |
 | PostgreSQL 原始表 | `procurement_audit_raw.projects`、`suppliers`、`expert_scores`、`evidence_files` |
 | MinIO | `127.0.0.1:9000`，bucket `procurement-compliance-audit-fixtures` |
 | 输出目录 | `output` |
@@ -222,10 +222,10 @@ Qwen 只返回文档类型、专家编号、供应商、推荐、参评、回避
 仓库默认配置为：
 
 ```yaml
-runner: local
+runner: ray
 ```
 
-仓库实际默认值是 `runner: local`；改成 `runner: ray` 即可选择分布式路径。带图片能力的本地 Vane 构建在两种模式下使用相同的 SQL Relation 合同。
+仓库实际默认值是 `runner: ray`；只有在有意测试 Local 后端时才改为 `runner: local`。带图片能力的本地 Vane 构建在两种模式下使用相同的 SQL Relation 合同。
 
 Local 模式下，Pipeline 在 Driver 上创建一份 `EvidenceOcrActor` 实现，对每个可信证据 locator 执行一次，再将不可变结果挂载为 `evidence_ocr_json(bucket, object_key)`。
 

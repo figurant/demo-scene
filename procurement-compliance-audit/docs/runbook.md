@@ -212,7 +212,7 @@ The checked-in `runtime.yml` defines:
 
 | Setting | Default |
 | --- | --- |
-| Runner | `local` |
+| Runner | `ray` |
 | PostgreSQL raw tables | `procurement_audit_raw.projects`, `suppliers`, `expert_scores`, `evidence_files` |
 | MinIO | `127.0.0.1:9000`, bucket `procurement-compliance-audit-fixtures` |
 | Output directory | `output` |
@@ -222,10 +222,10 @@ The checked-in `runtime.yml` defines:
 The checked-in configuration uses:
 
 ```yaml
-runner: local
+runner: ray
 ```
 
-The checked-in value is `runner: local`; change it to `runner: ray` for the distributed path. The image-capable local Vane build uses the same SQL relation contracts in both modes.
+The checked-in value is `runner: ray`; set `runner: local` only when intentionally testing the Local backend. The image-capable local Vane build uses the same SQL relation contracts in both modes.
 
 On Local, the pipeline creates one `EvidenceOcrActor` implementation on the driver, processes every trusted evidence locator once, and attaches the immutable results as `evidence_ocr_json(bucket, object_key)`.
 
